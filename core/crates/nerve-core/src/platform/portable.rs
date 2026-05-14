@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 use nerve_protocol::{
     ActiveWindow, Backends, Bounds, Capabilities, CursorPosition, MouseButton, Platform, UiNode,

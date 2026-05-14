@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn differing_pixels_produce_dirty_tile() {
-        let mut frame_a = vec![0u8; 128 * 128 * 4];
+        let frame_a = vec![0u8; 128 * 128 * 4];
         let mut frame_b = vec![0u8; 128 * 128 * 4];
         // Flip a single pixel in the top-left tile of frame_b.
         frame_b[0] = 255;
