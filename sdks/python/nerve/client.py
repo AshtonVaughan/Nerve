@@ -64,9 +64,14 @@ class NerveClient:
         return self._run(self._async.get_capabilities())
 
     def get_observation(
-        self, include_screenshot: bool = True, include_ui_tree: bool = False
+        self,
+        include_screenshot: bool = True,
+        include_ui_tree: bool = False,
+        include_ocr: bool = False,
     ) -> Observation:
-        return self._run(self._async.get_observation(include_screenshot, include_ui_tree))
+        return self._run(
+            self._async.get_observation(include_screenshot, include_ui_tree, include_ocr)
+        )
 
     def subscribe_observations(
         self, interval_ms: int = 500, include_screenshot: bool = False

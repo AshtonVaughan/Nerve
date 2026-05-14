@@ -68,6 +68,10 @@ enum Cmd {
         with_screenshot: bool,
         #[arg(long, default_value_t = false)]
         with_ui_tree: bool,
+        /// Run OCR over the screenshot before returning. Requires a daemon
+        /// built with --features ocr-tesseract.
+        #[arg(long, default_value_t = false)]
+        with_ocr: bool,
     },
     /// Capture the primary screen to a PNG file.
     Screenshot {
@@ -194,8 +198,8 @@ async fn main() -> Result<()> {
         Cmd::Status => status(&cli.host, cli.port).await,
         Cmd::Doctor { json } => doctor(&cli.host, cli.port, json).await,
         Cmd::Capabilities => capabilities(&cli.host, cli.port).await,
-        Cmd::Observe { with_screenshot, with_ui_tree } => {
-            observe(&cli.host, cli.port, with_screenshot, with_ui_tree).await
+        Cmd::Observe { with_screenshot, with_ui_tree, with_ocr } => {
+            observe(&cli.host, cli.port, with_screenshot, with_ui_tree, with_ocr).await
         }
         Cmd::Screenshot { out } => screenshot(&cli.host, cli.port, &out).await,
         Cmd::Click { x, y, button } => click(&cli.host, cli.port, x, y, &button).await,
@@ -430,10 +434,16 @@ async fn capabilities(host: &str, port: u16) -> Result<()> {
     Ok(())
 }
 
-async fn observe(host: &str, port: u16, with_screenshot: bool, with_ui_tree: bool) -> Result<()> {
+async fn observe(
+    host: &str,
+    port: u16,
+    with_screenshot: bool,
+    with_ui_tree: bool,
+    with_ocr: bool,
+) -> Result<()> {
     let mut c = CliClient::connect(host, port).await?;
     c.session_start().await?;
-    let obs = c.observation(with_screenshot, with_ui_tree).await?;
+    let obs = c.observation(with_screenshot, with_ui_tree, with_ocr).await?;
     // Drop the base64 payload from the printed output unless explicitly asked.
     let mut value = serde_json::to_value(&obs)?;
     if !with_screenshot {
@@ -450,7 +460,7 @@ async fn observe(host: &str, port: u16, with_screenshot: bool, with_ui_tree: boo
 async fn screenshot(host: &str, port: u16, out: &str) -> Result<()> {
     let mut c = CliClient::connect(host, port).await?;
     c.session_start().await?;
-    let obs = c.observation(true, false).await?;
+    let obs = c.observation(true, false, false).await?;
     let b64 = obs
         .screen
         .screenshot_base64

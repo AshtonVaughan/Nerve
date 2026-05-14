@@ -19,11 +19,23 @@ use crate::safety::SafetyEngine;
 pub struct ObserveOpts {
     pub include_screenshot: bool,
     pub include_ui_tree: bool,
+    /// Run OCR over the captured screenshot and populate
+    /// `Observation.ocr`. Has no effect when the build was compiled without
+    /// `--features ocr-tesseract`.
+    pub include_ocr: bool,
 }
 
 impl ObserveOpts {
-    pub const ALL: Self = Self { include_screenshot: true, include_ui_tree: true };
-    pub const FAST: Self = Self { include_screenshot: false, include_ui_tree: false };
+    pub const ALL: Self = Self {
+        include_screenshot: true,
+        include_ui_tree: true,
+        include_ocr: true,
+    };
+    pub const FAST: Self = Self {
+        include_screenshot: false,
+        include_ui_tree: false,
+        include_ocr: false,
+    };
 }
 
 pub async fn observe(
@@ -44,6 +56,10 @@ pub async fn observe(
 
     let capture_timeout = std::time::Duration::from_millis(2500);
     let cap_result = tokio::time::timeout(capture_timeout, backend.capture_primary_screen()).await;
+    // Stash the raw PNG bytes if any consumer of this observation (OCR,
+    // compiler) needs them. We only keep them in-memory while populating
+    // the Observation; they aren't serialised when `include_screenshot=false`.
+    let mut raw_png: Option<Vec<u8>> = None;
     if opts.include_screenshot {
         match cap_result {
             Ok(Ok(captured)) => {
@@ -55,6 +71,7 @@ pub async fn observe(
                 use base64::Engine;
                 screen.screenshot_base64 =
                     Some(base64::engine::general_purpose::STANDARD.encode(&captured.png_bytes));
+                raw_png = Some(captured.png_bytes);
             }
             Ok(Err(e)) => warn!("screen capture failed: {e}"),
             Err(_) => warn!("screen capture timed out"),
@@ -64,6 +81,9 @@ pub async fn observe(
         screen.height = captured.height;
         screen.scale_factor = captured.scale_factor;
         screen.screenshot_hash = Some(sha256_hex(&captured.png_bytes));
+        if opts.include_ocr {
+            raw_png = Some(captured.png_bytes);
+        }
     }
 
     let monitors = tokio::time::timeout(
@@ -105,6 +125,32 @@ pub async fn observe(
         vec![]
     };
 
+    // OCR runs on a blocking thread so the 100-500ms tesseract pass cannot
+    // stall the daemon's request loop. Skipped silently when the feature is
+    // off or when we have no PNG bytes to feed.
+    let ocr = if opts.include_ocr && crate::ocr::enabled() {
+        match raw_png.as_ref() {
+            Some(bytes) => {
+                let bytes = bytes.clone();
+                let join = tokio::task::spawn_blocking(move || crate::ocr::extract(&bytes));
+                match tokio::time::timeout(std::time::Duration::from_secs(5), join).await {
+                    Ok(Ok(fragments)) => fragments,
+                    Ok(Err(e)) => {
+                        warn!("ocr task join error: {e}");
+                        vec![]
+                    }
+                    Err(_) => {
+                        warn!("ocr timed out");
+                        vec![]
+                    }
+                }
+            }
+            None => vec![],
+        }
+    } else {
+        vec![]
+    };
+
     let safety_state = SafetyState {
         agent_active: !safety.is_emergency_stopped() && !safety.policy().human_takeover,
         dry_run: safety.policy().dry_run,
@@ -121,7 +167,7 @@ pub async fn observe(
         cursor,
         active_window,
         ui_tree,
-        ocr: vec![],
+        ocr,
         focused_element: None,
         last_action: None,
         dirty_tiles: vec![],

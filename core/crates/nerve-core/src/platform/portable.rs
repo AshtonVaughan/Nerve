@@ -136,7 +136,10 @@ impl PlatformBackend for PortableBackend {
             accessibility_tree: false,
             clipboard: true,
             semantic_actions: true,
-            ocr: false,
+            // Tracks whether this build was compiled with the Tesseract
+            // feature so SDKs can advertise the OCR rung of the compiler
+            // ladder honestly.
+            ocr: crate::ocr::enabled(),
             wayland_limited: detect_wayland_limited(),
             missing_permissions: vec![],
             backends: self.backends(),

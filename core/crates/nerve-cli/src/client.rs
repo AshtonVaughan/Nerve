@@ -91,12 +91,18 @@ impl CliClient {
         }
     }
 
-    pub async fn observation(&mut self, include_screenshot: bool, include_ui_tree: bool) -> Result<Observation> {
+    pub async fn observation(
+        &mut self,
+        include_screenshot: bool,
+        include_ui_tree: bool,
+        include_ocr: bool,
+    ) -> Result<Observation> {
         let resp = self
             .request(|request_id| ClientMessage::GetObservation {
                 request_id,
                 include_screenshot: Some(include_screenshot),
                 include_ui_tree: Some(include_ui_tree),
+                include_ocr: Some(include_ocr),
             })
             .await?;
         match resp {

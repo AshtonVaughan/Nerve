@@ -225,7 +225,7 @@ export type ClientMessage =
     }
   | { kind: "session_stop"; request_id: string }
   | { kind: "get_capabilities"; request_id: string }
-  | { kind: "get_observation"; request_id: string; include_screenshot?: boolean; include_ui_tree?: boolean }
+  | { kind: "get_observation"; request_id: string; include_screenshot?: boolean; include_ui_tree?: boolean; include_ocr?: boolean }
   | { kind: "subscribe_observations"; request_id: string; interval_ms: number; include_screenshot?: boolean; cursor_only?: boolean; delta_frames?: boolean }
   | { kind: "unsubscribe_observations"; request_id: string }
   | { kind: "execute_action"; request_id: string; action: ActionEnvelope }

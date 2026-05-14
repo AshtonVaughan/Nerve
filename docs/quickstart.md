@@ -10,14 +10,35 @@ git clone https://github.com/ashtonvaughan/nerve.git
 cd nerve/core
 cargo build --release
 
+# Or with OCR (Tesseract-backed) wired into the action compiler's lowering
+# ladder, which lets `click_element_by_text` work even when the
+# accessibility tree is empty:
+cargo build --release --features ocr-tesseract
+
 # Run it.
 ./target/release/nerve start
 ```
 
-On Linux you may need to install build-time X11 deps first:
+On Linux you may need to install build-time X11 deps first. Add the
+Tesseract packages if you want the OCR rung:
 
 ```bash
 sudo apt install -y libxdo-dev libxtst-dev libxcb1-dev libdbus-1-dev
+# OCR (optional but recommended):
+sudo apt install -y libtesseract-dev libleptonica-dev tesseract-ocr-eng clang libclang-dev
+```
+
+On macOS:
+
+```bash
+brew install tesseract leptonica   # only if you want OCR
+```
+
+To verify OCR landed, run:
+
+```bash
+./target/release/nerve capabilities | jq .ocr
+# => true   when built with --features ocr-tesseract
 ```
 
 ### Windows
