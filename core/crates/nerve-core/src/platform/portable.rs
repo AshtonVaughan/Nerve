@@ -193,6 +193,35 @@ impl PlatformBackend for PortableBackend {
         Ok(captured)
     }
 
+    async fn monitors(&self) -> Result<Vec<nerve_protocol::Monitor>> {
+        if is_headless() {
+            return Ok(Vec::new());
+        }
+        let mons = tokio::task::spawn_blocking(|| -> Result<Vec<nerve_protocol::Monitor>> {
+            let raw = xcap::Monitor::all()
+                .map_err(|e| NerveError::Backend(format!("xcap monitors: {e}")))?;
+            let mut out = Vec::new();
+            for (i, m) in raw.into_iter().enumerate() {
+                out.push(nerve_protocol::Monitor {
+                    index: i as u32,
+                    name: m.name().to_string(),
+                    bounds: nerve_protocol::Bounds {
+                        x: m.x() as i32,
+                        y: m.y() as i32,
+                        width: m.width() as i32,
+                        height: m.height() as i32,
+                    },
+                    scale_factor: m.scale_factor(),
+                    is_primary: m.is_primary(),
+                });
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| NerveError::Backend(format!("monitors join: {e}")))??;
+        Ok(mons)
+    }
+
     async fn cursor_position(&self) -> Result<CursorPosition> {
         // enigo's `Mouse::location` is the standard cross-platform way.
         let pos = tokio::task::block_in_place(|| -> Result<CursorPosition> {

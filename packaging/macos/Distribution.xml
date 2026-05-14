@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="1">
+  <title>Nerve</title>
+  <organization>dev.nerve</organization>
+  <domains enable_localSystem="true"/>
+  <options customize="never" allow-external-scripts="no" rootVolumeOnly="true"/>
+  <choices-outline>
+    <line choice="default">
+      <line choice="dev.nerve.daemon"/>
+    </line>
+  </choices-outline>
+  <choice id="default"/>
+  <choice id="dev.nerve.daemon" title="Nerve daemon">
+    <pkg-ref id="dev.nerve.daemon"/>
+  </choice>
+  <pkg-ref id="dev.nerve.daemon" version="0.1.0" auth="Root">nerve-daemon.pkg</pkg-ref>
+</installer-gui-script>

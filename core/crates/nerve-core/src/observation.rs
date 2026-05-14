@@ -39,6 +39,7 @@ pub async fn observe(
         screenshot_base64: None,
         screenshot_format: "png".to_string(),
         screenshot_hash: None,
+        monitors: Vec::new(),
     };
 
     let capture_timeout = std::time::Duration::from_millis(2500);
@@ -64,6 +65,16 @@ pub async fn observe(
         screen.scale_factor = captured.scale_factor;
         screen.screenshot_hash = Some(sha256_hex(&captured.png_bytes));
     }
+
+    let monitors = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        backend.monitors(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or_default();
+    screen.monitors = monitors;
 
     let cursor = tokio::time::timeout(
         std::time::Duration::from_millis(1500),

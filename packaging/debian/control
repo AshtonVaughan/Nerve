@@ -1,0 +1,15 @@
+Source: nerve
+Section: utils
+Priority: optional
+Maintainer: Nerve Contributors <oss@nerve.dev>
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libxdo-dev, libxtst-dev, libxcb1-dev, libdbus-1-dev, pkg-config
+Standards-Version: 4.6.0
+Homepage: https://github.com/ashtonvaughan/nerve
+
+Package: nerve
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libxdo3, libxtst6, libxcb1, libdbus-1-3
+Description: Real-time computer-use execution runtime for AI agents
+ Nerve is the body for AI agents — a native cross-platform daemon that
+ exposes a WebSocket protocol for observation, semantic action execution,
+ safety, audit, and replay.
