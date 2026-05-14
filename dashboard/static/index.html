@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Nerve · local dashboard</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="dot" id="status-dot"></span>
+      <h1>Nerve</h1>
+      <span class="subtitle">local control plane</span>
+    </div>
+    <div class="header-actions">
+      <span id="platform-pill" class="pill">…</span>
+      <button id="emergency-stop" class="danger">Emergency stop</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel screenshot">
+      <h2>Live screen</h2>
+      <div class="canvas-wrap">
+        <img id="screenshot" alt="screen preview" />
+        <div id="cursor-pip"></div>
+      </div>
+      <p class="caption">
+        cursor <span id="cursor-x">–</span>, <span id="cursor-y">–</span> ·
+        active <span id="active-window">–</span>
+      </p>
+    </section>
+
+    <section class="panel state">
+      <h2>State</h2>
+      <dl>
+        <dt>Session</dt><dd id="session-id">–</dd>
+        <dt>Backends</dt><dd id="backends">–</dd>
+        <dt>Connected clients</dt><dd id="clients">0</dd>
+        <dt>Last action</dt><dd id="last-action">–</dd>
+        <dt>Last safety decision</dt><dd id="last-safety">–</dd>
+      </dl>
+      <h3>Safety</h3>
+      <ul>
+        <li>dry-run <span id="safety-dry">false</span></li>
+        <li>confirmation <span id="safety-confirm">false</span></li>
+        <li>human takeover <span id="safety-takeover">false</span></li>
+        <li>emergency stopped <span id="safety-stop">false</span></li>
+      </ul>
+    </section>
+
+    <section class="panel observation">
+      <h2>Current observation</h2>
+      <pre id="observation-json">–</pre>
+    </section>
+
+    <section class="panel history">
+      <h2>Action history</h2>
+      <table>
+        <thead><tr><th>time</th><th>type</th><th>method</th><th>ok</th></tr></thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </section>
+
+    <section class="panel replay">
+      <h2>Replay (placeholder)</h2>
+      <p>Pick a session to replay. The replay viewer ships in the next release.</p>
+      <select id="replay-session"></select>
+    </section>
+  </main>
+
+  <script type="module" src="/dashboard.js"></script>
+</body>
+</html>
