@@ -1,0 +1,37 @@
+# Rust
+core/target/
+**/*.rs.bk
+**/Cargo.lock.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.tox/
+.venv/
+venv/
+*.egg
+.coverage
+htmlcov/
+
+# Node / TypeScript
+node_modules/
+sdks/typescript/dist/
+*.tsbuildinfo
+
+# Local artefacts
+benchmarks/results/*.json
+.nerve/
+*.log
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Daemon scratch
+/tmp/nerve-*.log
