@@ -1,0 +1,9 @@
+{
+  "task": "clipboard_copy_paste",
+  "description": "Recorded action sequence for a benchmark task. The harness replays these actions against the Nerve daemon; the success oracle (see benchmarks/harness/tasks.py) decides whether the run passed.",
+  "recorded_with": "static — no model required",
+  "actions": [
+    {"type": "clipboard_set", "text": "nerve clipboard demo"},
+    {"type": "clipboard_get"}
+  ]
+}

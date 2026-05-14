@@ -136,6 +136,25 @@ jobs:
           python -m agents.demo.run_demo
           python -m benchmarks.harness.runner
 
+      - name: Run cassette-replayed benchmarks (must all pass)
+        env:
+          PYTHONPATH: sdks/python
+        run: |
+          # Daemon from previous step is still up; replay the 3 cassettes
+          # that ship in the repo.
+          out=$(python -m benchmarks.harness.runner \
+              --cassettes \
+              --task clipboard_copy_paste \
+              --task calculator_demo \
+              --task change_setting \
+              --out-dir /tmp/bench-cassettes)
+          echo "$out"
+          # Assert: every line of summary contains success=True.
+          if echo "$out" | grep -E '^\s+success=False'; then
+            echo "FAIL: at least one cassette task did not succeed"
+            exit 1
+          fi
+
   fuzz:
     name: protocol fuzz (smoke)
     runs-on: ubuntu-latest

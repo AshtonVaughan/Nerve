@@ -49,6 +49,23 @@ class TaskResult:
     est_cost_usd: float
     avg_action_latency_ms: float
     methods: List[str] = field(default_factory=list)
+    action_types: List[str] = field(default_factory=list)
+
+
+CASSETTE_DIR = REPO_ROOT / "benchmarks" / "cassettes"
+
+
+def load_cassette(cassette_name: str) -> List[Dict[str, Any]]:
+    """Load a recorded action sequence from `benchmarks/cassettes/<name>`."""
+    path = CASSETTE_DIR / cassette_name
+    if not path.exists():
+        raise FileNotFoundError(
+            f"cassette {cassette_name} not found at {path}. "
+            f"Record one with `python -m benchmarks.harness.record --task <name>`"
+        )
+    with open(path) as f:
+        data = json.load(f)
+    return data["actions"]
 
 
 def auto_start_daemon(dry_run: bool) -> subprocess.Popen:
@@ -76,24 +93,31 @@ def auto_start_daemon(dry_run: bool) -> subprocess.Popen:
     raise RuntimeError("daemon never started accepting connections")
 
 
-def run_task(client: NerveClient, task: BenchTask) -> TaskResult:
+def run_task(client: NerveClient, task: BenchTask, use_cassette: bool = False) -> TaskResult:
     started = time.perf_counter()
     methods: List[str] = []
+    action_types: List[str] = []
     failed = 0
     screenshots = 0
     recovery = 0
     latencies: List[float] = []
 
-    for action in task.plan:
+    plan = task.plan
+    if use_cassette and task.cassette:
+        plan = load_cassette(task.cassette)
+
+    for action in plan:
         per = time.perf_counter()
         try:
             result = client.execute(action)
-        except Exception as e:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             methods.append("error")
+            action_types.append(action.get("type", "?"))
             failed += 1
             continue
         latencies.append((time.perf_counter() - per) * 1000.0)
         methods.append(result.method)
+        action_types.append(action.get("type", "?"))
         if not result.ok:
             failed += 1
         if action.get("type") in ("screenshot", "get_observation") and result.ok:
@@ -105,11 +129,18 @@ def run_task(client: NerveClient, task: BenchTask) -> TaskResult:
     duration_ms = int((time.perf_counter() - started) * 1000)
     avg_latency = sum(latencies) / len(latencies) if latencies else 0.0
 
+    record = {
+        "methods": methods,
+        "action_types": action_types,
+        "failed_actions": failed,
+        "dry_run": True,
+    }
+
     return TaskResult(
         name=task.name,
-        task_success=task.succeeded(methods),
+        task_success=task.succeeded(record),
         task_duration_ms=duration_ms,
-        action_count=len(task.plan),
+        action_count=len(plan),
         failed_actions=failed,
         screenshot_count=screenshots,
         recovery_attempts=recovery,
@@ -118,6 +149,7 @@ def run_task(client: NerveClient, task: BenchTask) -> TaskResult:
         est_cost_usd=0.0,
         avg_action_latency_ms=round(avg_latency, 2),
         methods=methods,
+        action_types=action_types,
     )
 
 
@@ -126,6 +158,11 @@ def main() -> int:
     parser.add_argument("--auto-start", action="store_true")
     parser.add_argument("--live", action="store_true")
     parser.add_argument("--task", action="append", help="run only these tasks")
+    parser.add_argument(
+        "--cassettes",
+        action="store_true",
+        help="for tasks with a cassette attribute, replay the recorded action sequence",
+    )
     parser.add_argument(
         "--out-dir", default=str(REPO_ROOT / "benchmarks" / "results"), help="directory for result JSON"
     )
@@ -149,7 +186,7 @@ def main() -> int:
             if args.task and task.name not in args.task:
                 continue
             print(f"[bench] running {task.name}")
-            r = run_task(client, task)
+            r = run_task(client, task, use_cassette=args.cassettes)
             print(
                 f"        success={r.task_success} duration={r.task_duration_ms}ms "
                 f"failed={r.failed_actions} avg_latency={r.avg_action_latency_ms}ms"

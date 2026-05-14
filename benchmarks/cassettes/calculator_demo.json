@@ -1,0 +1,10 @@
+{
+  "task": "calculator_demo",
+  "description": "Open calculator and add 2 + 3. Cassette is the static plan; record from Anthropic by running the harness with the recorder script (see docs/benchmark-methodology.md).",
+  "recorded_with": "static — no model required",
+  "actions": [
+    {"type": "open_app", "name": "calculator"},
+    {"type": "wait", "ms": 800},
+    {"type": "type_text", "text": "2+3="}
+  ]
+}

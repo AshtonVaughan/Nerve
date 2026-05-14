@@ -1,0 +1,11 @@
+{
+  "task": "change_setting",
+  "description": "Open settings via hotkey, wait for the dialog, then tab to and toggle a checkbox.",
+  "recorded_with": "static — no model required",
+  "actions": [
+    {"type": "hotkey", "keys": ["ctrl", "comma"]},
+    {"type": "wait", "ms": 500},
+    {"type": "key_press", "key": "tab"},
+    {"type": "key_press", "key": "space"}
+  ]
+}
