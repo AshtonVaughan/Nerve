@@ -4,11 +4,22 @@
 //! macOS, Windows, and Linux while keeping platform-specific quirks (Wayland,
 //! permission prompts, integrity levels) isolated.
 //!
-//! For the MVP we ship a portable backend that wraps `xcap`, `enigo`, and
-//! `arboard`. Platform-specific backends (ScreenCaptureKit, UI Automation,
-//! AT-SPI, Wayland portals) are sketched out in `macos.rs`, `windows.rs`, and
-//! `linux.rs` and currently delegate to the portable layer with TODOs for
-//! deeper integration.
+//! Substrate: a portable backend that wraps `xcap`, `enigo`, and `arboard`.
+//! Each platform module supplements that substrate with native paths:
+//!
+//! * `windows.rs` — always-on SendInput (Unicode) for typing, UI Automation
+//!   for the AX tree, GetForegroundWindow for active-window, integrity
+//!   level probe for UIPI.
+//! * `macos.rs` — with `--features macos-accessibility`: AXUIElement tree,
+//!   CGEvent clicks, Screen Recording / Accessibility permission probes.
+//! * `linux.rs` — with `--features linux-atspi`: AT-SPI 2 tree walk;
+//!   always-on `is_wayland_session` + `uinput_available` probes for
+//!   honest `nerve doctor` output.
+//!
+//! Items remaining for future work (replacements rather than additions):
+//! ScreenCaptureKit on macOS, DXGI on Windows, PipeWire portal on Wayland.
+//! The user has explicitly out-of-scoped replacing the xcap path until
+//! the native screen-capture work warrants its own PR.
 
 use async_trait::async_trait;
 
