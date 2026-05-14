@@ -294,9 +294,6 @@ fn libc_setsid() {
     unsafe { libc::setsid() };
 }
 
-#[cfg(not(unix))]
-fn libc_setsid() {}
-
 async fn stop(host: &str, port: u16) -> Result<()> {
     let mut c = CliClient::connect(host, port).await?;
     c.session_start().await?;

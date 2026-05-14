@@ -1,44 +1,51 @@
 //! Windows native backend extensions.
 //!
-//! Compiled in only when `--features windows-uia` is set. Wires:
+//! Compiled in on every Windows target. The Windows backend in `windows.rs`
+//! calls into these functions for the paths that have a clearly-better
+//! native implementation than the cross-platform crates can provide:
 //!
-//! * `GetForegroundWindow()` + `GetWindowTextW` for active window.
-//! * `EnumWindows` for window enumeration.
-//! * `SendInput` with INPUT_KEYBOARD / INPUT_MOUSE for input that honours
-//!   the user's keyboard layout (including IME pre-composition state).
-//! * `GetTokenInformation(TokenIntegrityLevel)` to detect when the daemon
-//!   runs at a lower integrity level than the target window.
-//!
-//! UI Automation walking is sketched as a stub here because a full UIA tree
-//! walk depends on COM apartment setup the daemon must do at startup. The
-//! plumbing is in place for the next milestone.
+//! * `GetForegroundWindow()` + `GetWindowRect` for active window — bounds
+//!   in virtual-desktop coordinates rather than xcap's per-display guess.
+//! * `SendInput(KEYEVENTF_UNICODE)` for text input — honours the user's
+//!   keyboard layout, lets IME pre-composition state through unchanged, and
+//!   never lies about success the way enigo's send-VK path can on Windows.
+//! * `GetTokenInformation(TokenIntegrityLevel)` — surfaces UIPI failures
+//!   instead of silently dropping input against higher-integrity windows.
 
-#![cfg(all(target_os = "windows", feature = "windows-uia"))]
+#![cfg(target_os = "windows")]
 
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
+use crate::errors::{NerveError, Result};
 use nerve_protocol::{ActiveWindow, Bounds};
 
-use windows::Win32::Foundation::{BOOL, HWND, RECT};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId,
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, RECT};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     VIRTUAL_KEY,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId,
 };
 
 /// Foreground window + owning process info.
 pub fn foreground_window() -> Option<ActiveWindow> {
     unsafe {
         let hwnd = GetForegroundWindow();
-        if hwnd.0 == 0 {
+        if hwnd.0.is_null() {
             return None;
         }
         let len = GetWindowTextLengthW(hwnd) as usize;
-        let mut buf = vec![0u16; len + 1];
+        let mut buf = vec![0u16; len.saturating_add(1)];
         let read = GetWindowTextW(hwnd, &mut buf);
         let title = OsString::from_wide(&buf[..read as usize])
             .to_string_lossy()
@@ -62,41 +69,233 @@ pub fn foreground_window() -> Option<ActiveWindow> {
     }
 }
 
-/// Type Unicode text via `SendInput(KEYEVENTF_UNICODE)`. Unlike VK-based input,
-/// this honours the user's keyboard layout and lets IME pre-composition state
-/// through unchanged.
-pub fn send_unicode(text: &str) -> bool {
-    let mut inputs: Vec<INPUT> = Vec::with_capacity(text.chars().count() * 2);
-    for ch in text.encode_utf16() {
-        let mk_input = |code: u16, up: bool| INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(0),
-                    wScan: code,
-                    dwFlags: if up {
-                        KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
-                    } else {
-                        KEYEVENTF_UNICODE
-                    },
-                    time: 0,
-                    dwExtraInfo: 0,
-                },
-            },
-        };
-        inputs.push(mk_input(ch, false));
-        inputs.push(mk_input(ch, true));
+/// Type Unicode text via `SendInput(KEYEVENTF_UNICODE)`.
+///
+/// Returns the number of *characters* successfully sent (each character takes
+/// 1-2 INPUT records depending on surrogate pairs); a value less than
+/// `text.chars().count()` means SendInput was partially blocked (typically by
+/// UIPI). Callers should compare against `text.chars().count()` and treat any
+/// short read as failure.
+pub fn send_unicode(text: &str) -> Result<usize> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.is_empty() {
+        return Ok(0);
     }
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(units.len() * 2);
+    let mk_input = |code: u16, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: code,
+                dwFlags: if up {
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                } else {
+                    KEYEVENTF_UNICODE
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    for &unit in &units {
+        inputs.push(mk_input(unit, false));
+        inputs.push(mk_input(unit, true));
+    }
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent as usize != inputs.len() {
+        let err = unsafe { GetLastError() };
+        return Err(NerveError::Backend(format!(
+            "SendInput: only {sent}/{} INPUT records accepted (GetLastError={:?})",
+            inputs.len(),
+            err
+        )));
+    }
+    Ok(text.chars().count())
+}
+
+/// Returns the integrity level of the daemon's process.
+pub fn current_integrity_level() -> Result<u32> {
+    integrity_level_of(unsafe { GetCurrentProcess() })
+}
+
+/// Returns the integrity level of the process owning `hwnd`, when accessible.
+pub fn integrity_level_of_window(hwnd: HWND) -> Result<u32> {
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return Err(NerveError::Backend(
+            "GetWindowThreadProcessId returned 0".into(),
+        ));
+    }
+    let proc = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map_err(|e| NerveError::Backend(format!("OpenProcess: {e}")))?;
+    let il = integrity_level_of(proc);
     unsafe {
-        let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-        sent as usize == inputs.len()
+        let _ = CloseHandle(proc);
+    }
+    il
+}
+
+fn integrity_level_of(proc: HANDLE) -> Result<u32> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(proc, TOKEN_QUERY, &mut token)
+            .map_err(|e| NerveError::Backend(format!("OpenProcessToken: {e}")))?;
+
+        let mut required: u32 = 0;
+        // First call gets the buffer size.
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut required);
+
+        let mut buf = vec![0u8; required as usize];
+        GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr().cast()),
+            required,
+            &mut required,
+        )
+        .map_err(|e| NerveError::Backend(format!("GetTokenInformation: {e}")))?;
+
+        let tml = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let sid = tml.Label.Sid;
+        // The last sub-authority of the SID is the integrity level (0x2000
+        // low, 0x3000 medium, 0x4000 high, 0x5000 system).
+        let count = *GetSidSubAuthorityCount(sid);
+        let rid_ptr = GetSidSubAuthority(sid, (count - 1) as u32);
+        let rid = *rid_ptr;
+        let _ = CloseHandle(token);
+        Ok(rid)
     }
 }
 
-/// Detect whether the daemon's integrity level is below the foreground window's.
-/// When this returns true, `SendInput` will silently no-op against that window
-/// and the daemon should refuse to dispatch input rather than pretending to
-/// succeed. Implementation TODO once we add the elevated companion service.
+/// True when the foreground window runs at a higher integrity level than us
+/// — in which case `SendInput` will be UIPI-dropped silently and we should
+/// refuse to dispatch input rather than lie about success.
 pub fn target_higher_integrity() -> bool {
-    false
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null() {
+        return false;
+    }
+    match (current_integrity_level(), integrity_level_of_window(foreground)) {
+        (Ok(our_il), Ok(target_il)) => target_il > our_il,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip a Unicode string through `send_unicode` to a hidden window
+    /// and assert the WM_CHAR sequence we receive matches the input.
+    ///
+    /// This is an actual SendInput → message-pump test, not a mock. It needs
+    /// a desktop session (Session 1) to receive input; CI workers may run
+    /// in Session 0 where input is gated. The test is therefore behind
+    /// `--ignored` and is what we run manually on a Windows dev box / via
+    /// the `ci-windows-input` workflow job.
+    #[test]
+    #[ignore = "requires interactive Windows session"]
+    fn send_unicode_round_trips_via_hidden_window() {
+        use std::sync::mpsc;
+        use std::thread;
+        use windows::core::w;
+        use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
+            RegisterClassW, SetForegroundWindow, ShowWindow, TranslateMessage, CW_USEDEFAULT,
+            HMENU, HWND_DESKTOP, MSG, SW_HIDE, WINDOW_EX_STYLE, WM_CHAR, WM_DESTROY, WNDCLASSW,
+            WS_OVERLAPPEDWINDOW,
+        };
+        let (tx, rx) = mpsc::channel::<u16>();
+
+        thread::spawn(move || unsafe {
+            let class_name = w!("NerveTestWindow");
+            let inst = GetModuleHandleW(None).unwrap();
+            let wnd = WNDCLASSW {
+                lpfnWndProc: Some(wndproc(tx)),
+                hInstance: inst.into(),
+                lpszClassName: class_name,
+                ..Default::default()
+            };
+            RegisterClassW(&wnd);
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class_name,
+                w!("nerve-test"),
+                WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                400,
+                100,
+                HWND_DESKTOP,
+                HMENU::default(),
+                inst,
+                None,
+            )
+            .unwrap();
+            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = SetForegroundWindow(hwnd);
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        });
+
+        // Give the message thread time to register + foreground.
+        thread::sleep(std::time::Duration::from_millis(500));
+        let target = "Hi";
+        let count = send_unicode(target).expect("SendInput");
+        assert_eq!(count, target.chars().count());
+
+        let mut received: Vec<u16> = Vec::new();
+        while let Ok(unit) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            received.push(unit);
+            if received.len() == target.chars().count() {
+                break;
+            }
+        }
+        let got: String = String::from_utf16_lossy(&received);
+        assert_eq!(got, target);
+
+        // wndproc helper exposes the sender via a thread-local because
+        // WNDPROC is a bare fn pointer.
+        unsafe extern "system" fn handler(
+            hwnd: HWND,
+            msg: u32,
+            w: WPARAM,
+            l: LPARAM,
+        ) -> LRESULT {
+            match msg {
+                WM_CHAR => {
+                    SENDER.with(|s| {
+                        if let Some(tx) = s.borrow().as_ref() {
+                            let _ = tx.send(w.0 as u16);
+                        }
+                    });
+                    LRESULT(0)
+                }
+                WM_DESTROY => {
+                    PostQuitMessage(0);
+                    LRESULT(0)
+                }
+                _ => DefWindowProcW(hwnd, msg, w, l),
+            }
+        }
+
+        thread_local! {
+            static SENDER: std::cell::RefCell<Option<mpsc::Sender<u16>>> =
+                std::cell::RefCell::new(None);
+        }
+
+        unsafe fn wndproc(
+            tx: mpsc::Sender<u16>,
+        ) -> unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT {
+            SENDER.with(|s| *s.borrow_mut() = Some(tx));
+            handler
+        }
+    }
 }

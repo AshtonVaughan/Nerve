@@ -19,7 +19,6 @@ default = []
 # into the binary's capability advertisement.
 ocr-tesseract = ["nerve-core/ocr-tesseract"]
 macos-accessibility = ["nerve-core/macos-accessibility"]
-windows-uia = ["nerve-core/windows-uia"]
 linux-atspi = ["nerve-core/linux-atspi"]
 
 [dependencies]

@@ -15,9 +15,12 @@ clipboard = []
 # Optional Tesseract-backed OCR. Requires libtesseract/libleptonica on the
 # host. We feature-gate it because most CI runners don't have those installed.
 ocr-tesseract = ["dep:leptess"]
-# Reserved for platform-specific deep integrations that pull in heavier deps.
+# Platform-specific deep integrations. macos-accessibility and linux-atspi
+# remain feature-gated because they pull in extra system libraries that
+# CI / contributors won't always have; windows-uia has no extra system
+# dependency so it's always on for Windows targets via the `windows`
+# crate below.
 macos-accessibility = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:core-graphics", "dep:accessibility-sys"]
-windows-uia = ["dep:windows"]
 linux-atspi = ["dep:atspi"]
 
 [dependencies]
@@ -68,13 +71,21 @@ core-graphics = { version = "0.24", optional = true }
 accessibility-sys = { version = "0.1", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", optional = true, features = [
+# Unconditional on Windows: the native SendInput / UIA / GetForegroundWindow
+# paths are the only sensible default on the platform. There's no extra
+# system dependency at runtime so there's no reason to feature-gate it.
+windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
+    "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_System_LibraryLoader",
+    "Win32_System_Variant",
+    "UI_UIAutomation",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
