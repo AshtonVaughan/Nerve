@@ -116,9 +116,13 @@ pub struct Observation {
     pub ocr: Vec<OcrFragment>,
     pub focused_element: Option<UiNode>,
     pub last_action: Option<String>,
-    /// Reserved for diff stream support. None for now.
-    pub visual_diff: Option<serde_json::Value>,
+    /// Coarse "what changed since last tick" tile bounds. Populated when the
+    /// observation was produced for a `delta_frames` subscription.
+    #[serde(default)]
+    pub dirty_tiles: Vec<Bounds>,
     pub safety_state: SafetyState,
+    /// Reserved for future visual diff payloads (e.g. JPEG patches).
+    pub visual_diff: Option<serde_json::Value>,
 }
 
 /// Capabilities advertised by the daemon. Lets agents and SDKs degrade

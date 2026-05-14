@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::action::{ActionEnvelope, ActionResult, AuditEntry};
+use crate::errors::{ErrorCode, ProtocolVersion};
 use crate::observation::{Capabilities, Observation};
 use crate::policy::SafetyPolicy;
 
@@ -17,6 +18,14 @@ pub enum ClientMessage {
         request_id: String,
         client_name: Option<String>,
         client_version: Option<String>,
+        /// Protocol version the client speaks. The daemon refuses connections
+        /// where this is incompatible with [`ProtocolVersion::CURRENT`].
+        #[serde(default)]
+        client_protocol_version: Option<ProtocolVersion>,
+        /// Optional bearer token. Required when the daemon was launched with
+        /// `auth_token` set.
+        #[serde(default)]
+        auth_token: Option<String>,
         /// Optional explicit session id to resume an existing audit log.
         session_id: Option<String>,
         policy: Option<SafetyPolicy>,
@@ -32,6 +41,15 @@ pub enum ClientMessage {
         request_id: String,
         interval_ms: u64,
         include_screenshot: Option<bool>,
+        /// When true, send a cheap cursor-only frame at roughly 60Hz instead
+        /// of a full Observation. The daemon honours this regardless of
+        /// `interval_ms`.
+        #[serde(default)]
+        cursor_only: bool,
+        /// When true, the daemon attaches frame-delta tile bounds to each
+        /// observation so the client can decide what to refresh.
+        #[serde(default)]
+        delta_frames: bool,
     },
     UnsubscribeObservations { request_id: String },
     ExecuteAction {
@@ -72,9 +90,15 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Hello {
         protocol_version: String,
+        /// Structured version that supports semver-aware compatibility checks.
+        #[serde(default)]
+        protocol_version_struct: Option<ProtocolVersion>,
         daemon_version: String,
         platform: crate::observation::Platform,
         session_id: String,
+        /// True when the daemon requires `auth_token` in `session_start`.
+        #[serde(default)]
+        auth_required: bool,
     },
     SessionStarted {
         request_id: String,
@@ -86,6 +110,14 @@ pub enum ServerMessage {
     Observation {
         request_id: Option<String>,
         observation: Observation,
+    },
+    /// Lightweight cursor-position tick. Sent by `subscribe_observations`
+    /// when `cursor_only = true`. Carries no screenshot.
+    CursorTick {
+        request_id: Option<String>,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        cursor: crate::observation::CursorPosition,
+        active_window: Option<String>,
     },
     ActionResult {
         request_id: String,
@@ -119,7 +151,27 @@ pub enum ServerMessage {
     Pong { request_id: String, nonce: u64 },
     Error {
         request_id: Option<String>,
-        code: String,
+        code: ErrorCode,
         message: String,
+        /// Whether the SDK should retry the request.
+        #[serde(default)]
+        retryable: bool,
+        /// Suggested delay before retrying, in milliseconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
     },
+}
+
+impl ServerMessage {
+    /// Build an `Error` whose retry/retry_after fields are filled in from the
+    /// canonical [`ErrorCode`] table.
+    pub fn error(request_id: Option<String>, code: ErrorCode, message: impl Into<String>) -> Self {
+        ServerMessage::Error {
+            request_id,
+            code,
+            message: message.into(),
+            retryable: code.retryable(),
+            retry_after_ms: code.retry_after_ms(),
+        }
+    }
 }

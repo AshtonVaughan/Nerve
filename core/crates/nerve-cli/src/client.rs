@@ -61,11 +61,14 @@ impl CliClient {
     }
 
     pub async fn session_start(&mut self) -> Result<String> {
+        let token = std::env::var("NERVE_AUTH_TOKEN").ok();
         let resp = self
             .request(|request_id| ClientMessage::SessionStart {
                 request_id,
                 client_name: Some("nerve-cli".into()),
                 client_version: Some(env!("CARGO_PKG_VERSION").into()),
+                client_protocol_version: Some(nerve_protocol::ProtocolVersion::CURRENT),
+                auth_token: token,
                 session_id: None,
                 policy: None,
             })
@@ -105,7 +108,12 @@ impl CliClient {
 
     pub async fn execute(&mut self, action: AnyAction) -> Result<ActionResult> {
         let action_id = format!("act_{}", Uuid::new_v4().simple());
-        let env = ActionEnvelope { id: action_id, action, note: None };
+        let env = ActionEnvelope {
+            id: action_id,
+            action,
+            note: None,
+            idempotency_key: None,
+        };
         let resp = self
             .request(|request_id| ClientMessage::ExecuteAction {
                 request_id,
@@ -144,6 +152,7 @@ fn matches_request_id(msg: &ServerMessage, id: &str) -> bool {
         | ServerMessage::ReplayComplete { request_id, .. }
         | ServerMessage::Pong { request_id, .. } => request_id == id,
         ServerMessage::Observation { request_id, .. } => request_id.as_deref() == Some(id),
+        ServerMessage::CursorTick { request_id, .. } => request_id.as_deref() == Some(id),
         ServerMessage::Error { request_id, .. } => request_id.as_deref() == Some(id),
         ServerMessage::Hello { .. }
         | ServerMessage::EmergencyStopped { .. }

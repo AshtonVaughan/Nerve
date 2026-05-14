@@ -14,7 +14,6 @@ use clap::{Parser, Subcommand};
 use nerve_core::config::DaemonConfig;
 use nerve_core::Runtime;
 use nerve_protocol::{AnyAction, ClientMessage, LowLevelAction, MouseButton, ServerMessage};
-use serde_json::json;
 use tracing_subscriber::EnvFilter;
 
 mod client;
@@ -41,6 +40,15 @@ enum Cmd {
         /// Run with dry-run safety policy.
         #[arg(long)]
         dry_run: bool,
+        /// Override the config path.
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// Daemonize: fork into the background and write a pid file.
+        #[arg(long)]
+        daemonize: bool,
+        /// Path to the pid file when daemonizing.
+        #[arg(long, default_value = ".nerve.pid")]
+        pid_file: std::path::PathBuf,
     },
     /// Stop the running daemon (sends emergency-stop, then session_stop).
     Stop,
@@ -107,11 +115,63 @@ enum Cmd {
         #[arg(long, default_value_t = 1.0)]
         speed: f32,
     },
-    /// Print the current daemon config.
-    Config,
+    /// Manage daemon configuration files (write/show/edit).
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
+    /// Manage the daemon auth token (rotate/show).
+    Token {
+        #[command(subcommand)]
+        cmd: TokenCmd,
+    },
+    /// Register the daemon as a system service.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
+    /// Generate shell completion scripts.
+    Completion {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
     /// Engage emergency stop on the running daemon.
     #[command(name = "emergency-stop")]
     EmergencyStop,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCmd {
+    /// Print the resolved daemon config as TOML.
+    Show,
+    /// Write a default config file to the platform default location.
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Print the path the daemon will pick up.
+    Path,
+}
+
+#[derive(Debug, Subcommand)]
+enum TokenCmd {
+    /// Generate a new random auth token and write it to the config file.
+    Rotate,
+    /// Print the current auth token (if any).
+    Show,
+    /// Remove the auth token from the config file.
+    Clear,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCmd {
+    /// Install a service unit / launchd plist / Windows service.
+    Install,
+    /// Uninstall the service.
+    Uninstall,
+    /// Print the service status, if known.
+    Status,
 }
 
 #[tokio::main]
@@ -120,7 +180,9 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Start { dry_run } => start_daemon(dry_run).await,
+        Cmd::Start { dry_run, config, daemonize, pid_file } => {
+            start_daemon(dry_run, config, daemonize, pid_file).await
+        }
         Cmd::Stop => stop(&cli.host, cli.port).await,
         Cmd::Status => status(&cli.host, cli.port).await,
         Cmd::Doctor => doctor(&cli.host, cli.port).await,
@@ -137,7 +199,10 @@ async fn main() -> Result<()> {
         Cmd::ClipboardSet { text } => clipboard_set(&cli.host, cli.port, text).await,
         Cmd::Logs { session, limit } => logs(&cli.host, cli.port, session, limit).await,
         Cmd::Replay { session, speed } => replay(&cli.host, cli.port, session, speed).await,
-        Cmd::Config => config_cmd().await,
+        Cmd::Config { cmd } => config_cmd(cmd).await,
+        Cmd::Token { cmd } => token_cmd(cmd).await,
+        Cmd::Service { cmd } => service_cmd(cmd).await,
+        Cmd::Completion { shell } => completion_cmd(shell),
         Cmd::EmergencyStop => emergency_stop(&cli.host, cli.port).await,
     }
 }
@@ -150,24 +215,74 @@ fn install_tracing() {
         .init();
 }
 
-async fn start_daemon(dry_run: bool) -> Result<()> {
-    let mut config = DaemonConfig::default();
+async fn start_daemon(
+    dry_run: bool,
+    config_path: Option<std::path::PathBuf>,
+    daemonize: bool,
+    pid_file: std::path::PathBuf,
+) -> Result<()> {
+    let (mut config, resolved_path) = DaemonConfig::resolve(config_path.as_deref());
     if dry_run {
         config.default_policy.dry_run = true;
     }
+    if let Some(p) = resolved_path {
+        tracing::info!("loaded config from {}", p.display());
+    } else {
+        tracing::info!("using built-in default config (no config file found)");
+    }
+
+    if daemonize {
+        // Fork/spawn into the background and write a pid file. We
+        // intentionally re-exec ourselves with the env var
+        // NERVE_DAEMON_CHILD=1 so the child shares the exact same binary.
+        if std::env::var("NERVE_DAEMON_CHILD").is_err() {
+            let exe = std::env::current_exe()?;
+            let mut args: Vec<String> = std::env::args().collect();
+            // Strip `--daemonize` from passthrough args.
+            args.retain(|a| a != "--daemonize");
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(args.iter().skip(1));
+            cmd.env("NERVE_DAEMON_CHILD", "1");
+            #[cfg(unix)]
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                cmd.pre_exec(|| {
+                    libc_setsid();
+                    Ok(())
+                });
+            }
+            let child = cmd.spawn()?;
+            std::fs::write(&pid_file, child.id().to_string())?;
+            println!("nerve daemon started pid={} ({})", child.id(), pid_file.display());
+            return Ok(());
+        }
+        // Child path: nothing else to do; just continue into the runtime.
+        std::fs::write(&pid_file, std::process::id().to_string()).ok();
+    }
+
     let runtime = Runtime::new(config)?;
 
-    // Catch Ctrl-C to flush logs and ensure emergency-stop is broadcast.
+    // Catch Ctrl-C to flush logs and broadcast emergency-stop.
     let runtime_for_ctrlc = runtime.clone();
     ctrlc::set_handler(move || {
-        eprintln!("\n[nerve] ctrl-c received, broadcasting emergency stop");
+        eprintln!("\n[nerve] ctrl-c received, flushing and stopping");
         runtime_for_ctrlc.engage_emergency_stop();
+        runtime_for_ctrlc.shutdown();
         std::process::exit(0);
     })
     .ok();
 
     runtime.start().await
 }
+
+#[cfg(unix)]
+fn libc_setsid() {
+    // Detach from the controlling tty so the daemon survives terminal close.
+    unsafe { libc::setsid() };
+}
+
+#[cfg(not(unix))]
+fn libc_setsid() {}
 
 async fn stop(host: &str, port: u16) -> Result<()> {
     let mut c = CliClient::connect(host, port).await?;
@@ -417,12 +532,240 @@ async fn replay(host: &str, port: u16, session: String, speed: f32) -> Result<()
     Ok(())
 }
 
-async fn config_cmd() -> Result<()> {
-    let cfg = DaemonConfig::default();
-    println!("{}", serde_json::to_string_pretty(&json!({
-        "default": cfg,
-        "log_dir": nerve_core::config::default_log_dir(),
-    }))?);
+async fn config_cmd(cmd: ConfigCmd) -> Result<()> {
+    match cmd {
+        ConfigCmd::Show => {
+            let (cfg, source) = DaemonConfig::resolve(None);
+            if let Some(p) = source {
+                println!("# loaded from {}", p.display());
+            } else {
+                println!("# no config file found; showing built-in defaults");
+            }
+            println!("{}", cfg.to_toml_pretty()?);
+        }
+        ConfigCmd::Init { force } => {
+            let path = nerve_core::config::default_config_path()
+                .ok_or_else(|| anyhow!("could not resolve a config path on this OS"))?;
+            if path.exists() && !force {
+                return Err(anyhow!("{} already exists; pass --force to overwrite", path.display()));
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let cfg = DaemonConfig::default();
+            std::fs::write(&path, cfg.to_toml_pretty()?)?;
+            println!("wrote {}", path.display());
+        }
+        ConfigCmd::Path => {
+            if let Some(p) = nerve_core::config::default_config_path() {
+                println!("{}", p.display());
+            } else {
+                return Err(anyhow!("no config directory resolved for this OS"));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn token_cmd(cmd: TokenCmd) -> Result<()> {
+    let path = nerve_core::config::default_config_path()
+        .ok_or_else(|| anyhow!("no config dir on this OS"))?;
+    let (mut cfg, _src) = DaemonConfig::resolve(Some(&path));
+    match cmd {
+        TokenCmd::Rotate => {
+            let token = generate_token();
+            cfg.auth_token = Some(token.clone());
+            persist_config(&path, &cfg)?;
+            println!("rotated. new token (export NERVE_AUTH_TOKEN before running clients):");
+            println!("{token}");
+        }
+        TokenCmd::Show => match cfg.auth_token.as_deref() {
+            Some(t) => println!("{t}"),
+            None => println!("(no auth token configured)"),
+        },
+        TokenCmd::Clear => {
+            cfg.auth_token = None;
+            persist_config(&path, &cfg)?;
+            println!("cleared");
+        }
+    }
+    Ok(())
+}
+
+fn persist_config(path: &std::path::Path, cfg: &DaemonConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, cfg.to_toml_pretty()?)?;
+    Ok(())
+}
+
+fn generate_token() -> String {
+    // 192-bit random, base32-encoded for terminal-friendliness.
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut state: u128 = now ^ 0xa5a5_a5a5_a5a5_a5a5_a5a5_a5a5_a5a5_a5a5;
+    let mut out = String::with_capacity(48);
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    for _ in 0..48 {
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let idx = ((state >> 64) as u64 & 31) as usize;
+        out.push(ALPHA[idx] as char);
+    }
+    out
+}
+
+async fn service_cmd(cmd: ServiceCmd) -> Result<()> {
+    match cmd {
+        ServiceCmd::Install => install_service(),
+        ServiceCmd::Uninstall => uninstall_service(),
+        ServiceCmd::Status => status_service(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_service() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let unit = format!(
+        "[Unit]\nDescription=Nerve agent runtime\nAfter=network.target\n\n[Service]\nExecStart={} start\nRestart=on-failure\nUser=%i\nEnvironment=\"RUST_LOG=info\"\n\n[Install]\nWantedBy=default.target\n",
+        exe.display()
+    );
+    let path = dirs::config_dir()
+        .ok_or_else(|| anyhow!("no config dir"))?
+        .join("systemd/user/nerve.service");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, unit)?;
+    println!("wrote {}", path.display());
+    println!("enable + start with: systemctl --user enable --now nerve.service");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_service() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.nerve.daemon</string>
+  <key>ProgramArguments</key><array>
+    <string>{}</string>
+    <string>start</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+"#,
+        exe.display()
+    );
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
+    let path = home.join("Library/LaunchAgents/dev.nerve.daemon.plist");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, plist)?;
+    println!("wrote {}", path.display());
+    println!("load with: launchctl load -w {}", path.display());
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn install_service() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    println!(
+        "Run as Administrator:\n  sc.exe create NerveDaemon binPath= \"{} start\" start= auto",
+        exe.display()
+    );
+    println!("then:  sc.exe start NerveDaemon");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn install_service() -> Result<()> {
+    Err(anyhow!("service install not supported on this OS"))
+}
+
+#[cfg(target_os = "linux")]
+fn uninstall_service() -> Result<()> {
+    let path = dirs::config_dir()
+        .ok_or_else(|| anyhow!("no config dir"))?
+        .join("systemd/user/nerve.service");
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+        println!("removed {}", path.display());
+    } else {
+        println!("not installed");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn uninstall_service() -> Result<()> {
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("no home dir"))?;
+    let path = home.join("Library/LaunchAgents/dev.nerve.daemon.plist");
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+        println!("removed {}", path.display());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn uninstall_service() -> Result<()> {
+    println!("Run as Administrator: sc.exe delete NerveDaemon");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn uninstall_service() -> Result<()> {
+    Err(anyhow!("service uninstall not supported on this OS"))
+}
+
+fn status_service() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let out = std::process::Command::new("systemctl")
+            .args(["--user", "status", "nerve.service"])
+            .output()
+            .map_err(|e| anyhow!("systemctl: {e}"))?;
+        std::io::Write::write_all(&mut std::io::stdout(), &out.stdout).ok();
+        std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("launchctl")
+            .args(["list", "dev.nerve.daemon"])
+            .output()
+            .map_err(|e| anyhow!("launchctl: {e}"))?;
+        std::io::Write::write_all(&mut std::io::stdout(), &out.stdout).ok();
+        std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let out = std::process::Command::new("sc.exe")
+            .args(["query", "NerveDaemon"])
+            .output()
+            .map_err(|e| anyhow!("sc.exe: {e}"))?;
+        std::io::Write::write_all(&mut std::io::stdout(), &out.stdout).ok();
+        std::io::Write::write_all(&mut std::io::stderr(), &out.stderr).ok();
+    }
+    Ok(())
+}
+
+fn completion_cmd(shell: clap_complete::Shell) -> Result<()> {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
     Ok(())
 }
 

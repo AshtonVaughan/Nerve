@@ -93,6 +93,7 @@ pub async fn observe(
         ocr: vec![],
         focused_element: None,
         last_action: None,
+        dirty_tiles: vec![],
         visual_diff: None,
         safety_state,
     }

@@ -55,7 +55,7 @@ pub enum RuntimeEvent {
 impl Runtime {
     pub fn new(config: DaemonConfig) -> std::io::Result<Self> {
         let backend = platform::detect();
-        let audit = AuditLog::open(&config.log_dir)?;
+        let audit = AuditLog::open_with_rotation(&config.log_dir, config.audit.clone())?;
         let executor = Arc::new(Executor::new(backend.clone(), audit.clone()));
         Ok(Self {
             config: Arc::new(config),
@@ -66,6 +66,14 @@ impl Runtime {
         })
     }
 
+    /// Run any flush hooks so the daemon shuts down cleanly. Called from the
+    /// CLI's Ctrl-C handler and from the test harness.
+    pub fn shutdown(&self) {
+        if let Err(e) = self.audit.flush() {
+            tracing::warn!("audit flush on shutdown: {e}");
+        }
+    }
+
     pub fn capabilities(&self) -> Capabilities {
         let mut caps = self.backend.capabilities();
         caps.platform = self.backend.platform();
@@ -73,6 +81,11 @@ impl Runtime {
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
+        if self.config.telemetry.prometheus {
+            if let Err(e) = crate::metrics::install_prometheus(self.config.prometheus_bind) {
+                tracing::warn!("could not install prometheus exporter: {e}");
+            }
+        }
         info!(
             platform = ?Platform::current(),
             bind = %self.config.bind,
