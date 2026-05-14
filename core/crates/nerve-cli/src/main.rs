@@ -50,8 +50,20 @@ enum Cmd {
         #[arg(long, default_value = ".nerve.pid")]
         pid_file: std::path::PathBuf,
     },
-    /// Stop the running daemon (sends emergency-stop, then session_stop).
-    Stop,
+    /// Stop the running daemon. Sends the WebSocket emergency-stop, then a
+    /// graceful signal (SIGTERM on Unix, CTRL_BREAK_EVENT on Windows). If
+    /// the process is still alive after `--timeout`, escalate.
+    Stop {
+        /// Path to the pid file written by `nerve start`.
+        #[arg(long, default_value = ".nerve.pid")]
+        pid_file: std::path::PathBuf,
+        /// Seconds to wait for graceful shutdown before escalating.
+        #[arg(long, default_value_t = 5)]
+        timeout: u64,
+        /// Skip the graceful wait and TerminateProcess / SIGKILL immediately.
+        #[arg(long)]
+        force: bool,
+    },
     /// Report whether the daemon is reachable.
     Status,
     /// Inspect the local machine and print what's wired up.
@@ -194,7 +206,9 @@ async fn main() -> Result<()> {
         Cmd::Start { dry_run, config, daemonize, pid_file } => {
             start_daemon(dry_run, config, daemonize, pid_file).await
         }
-        Cmd::Stop => stop(&cli.host, cli.port).await,
+        Cmd::Stop { pid_file, timeout, force } => {
+            stop(&cli.host, cli.port, pid_file, timeout, force).await
+        }
         Cmd::Status => status(&cli.host, cli.port).await,
         Cmd::Doctor { json } => doctor(&cli.host, cli.port, json).await,
         Cmd::Capabilities => capabilities(&cli.host, cli.port).await,
@@ -271,6 +285,11 @@ async fn start_daemon(
         }
         // Child path: nothing else to do; just continue into the runtime.
         std::fs::write(&pid_file, std::process::id().to_string()).ok();
+    } else {
+        // Foreground path still writes a pid file so `nerve stop` can find
+        // us. We tolerate IO errors silently — the pid file is a
+        // convenience, not a correctness requirement.
+        let _ = std::fs::write(&pid_file, std::process::id().to_string());
     }
 
     let runtime = Runtime::new(config)?;
@@ -294,13 +313,158 @@ fn libc_setsid() {
     unsafe { libc::setsid() };
 }
 
-async fn stop(host: &str, port: u16) -> Result<()> {
-    let mut c = CliClient::connect(host, port).await?;
-    c.session_start().await?;
-    c.send(ClientMessage::EmergencyStop { request_id: "cli-stop".into() })
-        .await?;
-    println!("emergency stop sent");
+async fn stop(
+    host: &str,
+    port: u16,
+    pid_file: std::path::PathBuf,
+    timeout_secs: u64,
+    force: bool,
+) -> Result<()> {
+    // Try the WS-level emergency stop first so the daemon flushes its
+    // audit log gracefully even if we end up killing it below.
+    if !force {
+        if let Ok(mut c) = CliClient::connect(host, port).await {
+            let _ = c.session_start().await;
+            let _ = c
+                .send(ClientMessage::EmergencyStop {
+                    request_id: "cli-stop".into(),
+                })
+                .await;
+            println!("emergency stop sent");
+        }
+    }
+
+    let pid = match std::fs::read_to_string(&pid_file) {
+        Ok(s) => s.trim().parse::<u32>().ok(),
+        Err(_) => None,
+    };
+    if pid.is_none() {
+        if !force {
+            println!(
+                "no pid file at {} — daemon should exit on its own; pass --force to kill anyway",
+                pid_file.display()
+            );
+        } else {
+            println!("no pid file at {} — nothing to force-kill", pid_file.display());
+        }
+        return Ok(());
+    }
+    let pid = pid.unwrap();
+
+    if force {
+        force_kill(pid)?;
+        let _ = std::fs::remove_file(&pid_file);
+        println!("force-killed pid={pid}");
+        return Ok(());
+    }
+
+    graceful_signal(pid)?;
+    if wait_for_exit(pid, std::time::Duration::from_secs(timeout_secs)).await {
+        let _ = std::fs::remove_file(&pid_file);
+        println!("daemon pid={pid} exited cleanly");
+        return Ok(());
+    }
+    println!(
+        "daemon pid={pid} did not exit within {timeout_secs}s; escalating to TerminateProcess / SIGKILL"
+    );
+    force_kill(pid)?;
+    let _ = std::fs::remove_file(&pid_file);
     Ok(())
+}
+
+#[cfg(unix)]
+fn graceful_signal(pid: u32) -> Result<()> {
+    // SIGTERM = "shut down cleanly". Ctrl-C handler in the daemon turns
+    // this into a clean flush + emergency_stop + exit.
+    unsafe {
+        if libc::kill(pid as libc::pid_t, libc::SIGTERM) != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(()); // already gone
+            }
+            return Err(anyhow::anyhow!("kill(SIGTERM): {e}"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn force_kill(pid: u32) -> Result<()> {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, libc::SIGKILL) != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                return Err(anyhow::anyhow!("kill(SIGKILL): {e}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn graceful_signal(pid: u32) -> Result<()> {
+    // Console daemons receive CTRL_BREAK_EVENT via the process group id.
+    // We can only deliver it to console children whose process group we
+    // started — for foreign pids we fall back to a soft "post WM_CLOSE
+    // to the window" via taskkill /PID <pid>, which the SCM treats as a
+    // shutdown request. SIGKILL equivalent (TerminateProcess) lives in
+    // `force_kill` below.
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string()])
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(anyhow::anyhow!("taskkill exited with status {s}")),
+        Err(e) => Err(anyhow::anyhow!("taskkill: {e}")),
+    }
+}
+
+#[cfg(windows)]
+fn force_kill(pid: u32) -> Result<()> {
+    let status = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .status();
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(anyhow::anyhow!("taskkill /F exited with status {s}")),
+        Err(e) => Err(anyhow::anyhow!("taskkill /F: {e}")),
+    }
+}
+
+/// Poll `/proc` / `kill(pid, 0)` until the process is gone or `timeout` elapses.
+async fn wait_for_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    !pid_alive(pid)
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // kill(pid, 0) returns 0 if the process exists (and we have permission),
+    // ESRCH if it does not.
+    unsafe {
+        if libc::kill(pid as libc::pid_t, 0) == 0 {
+            return true;
+        }
+        let e = std::io::Error::last_os_error();
+        e.raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "csv", "/NH"])
+        .output();
+    match out {
+        Ok(o) => !o.stdout.is_empty() && !String::from_utf8_lossy(&o.stdout).contains("INFO:"),
+        Err(_) => false,
+    }
 }
 
 async fn status(host: &str, port: u16) -> Result<()> {
