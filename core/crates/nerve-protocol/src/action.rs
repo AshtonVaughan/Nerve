@@ -112,6 +112,12 @@ pub struct ActionEnvelope {
     pub action: AnyAction,
     /// Optional client-side note that ends up in the audit log.
     pub note: Option<String>,
+    /// Idempotency key — if the daemon has seen this same value for the
+    /// current session, it returns the cached [`ActionResult`] instead of
+    /// executing the action again. Lets SDKs retry on transient errors
+    /// without risk of a double click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// How the daemon ultimately fulfilled an action.

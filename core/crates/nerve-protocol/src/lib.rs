@@ -6,11 +6,13 @@
 //! pulling in the rest of the daemon.
 
 pub mod action;
+pub mod errors;
 pub mod observation;
 pub mod policy;
 pub mod ws;
 
 pub use action::*;
+pub use errors::*;
 pub use observation::*;
 pub use policy::*;
 pub use ws::*;
