@@ -20,10 +20,20 @@ use std::os::windows::ffi::OsStringExt;
 use crate::errors::{NerveError, Result};
 use nerve_protocol::{ActiveWindow, Bounds};
 
+use std::sync::Once;
+
+use nerve_protocol::UiNode;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, HWND, RECT};
 use windows::Win32::Security::{
     GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationCondition, IUIAutomationElement,
+    IUIAutomationElementArray, TreeScope_Children,
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -169,6 +179,179 @@ fn integrity_level_of(proc: HANDLE) -> Result<u32> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// UI Automation
+// ---------------------------------------------------------------------------
+
+/// Initialise COM in multi-threaded apartment mode for UIA calls. Idempotent;
+/// safe to call once per thread that issues UIA calls.
+pub fn init_com() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        // MTA is required for UIA on background tokio worker threads. The
+        // hresult is intentionally ignored — RPC_E_CHANGED_MODE means COM
+        // was already initialised on this thread with a different model,
+        // which is fine for our use.
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+    });
+}
+
+/// Walk the UI Automation tree under the foreground window.
+///
+/// Returns a flat list (depth-first) of [`UiNode`] entries. Each node carries
+/// its Name, ControlType-derived role, and BoundingRectangle. The walk is
+/// budget-capped (1024 nodes, depth 16) so a pathological app can't lock the
+/// daemon.
+pub fn ui_tree() -> Vec<UiNode> {
+    init_com();
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.0.is_null() {
+        return Vec::new();
+    }
+    match collect_tree(foreground) {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            tracing::warn!("UI Automation walk failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+fn collect_tree(hwnd: HWND) -> windows::core::Result<Vec<UiNode>> {
+    unsafe {
+        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)?;
+        let element = automation.ElementFromHandle(hwnd)?;
+        let mut out: Vec<UiNode> = Vec::new();
+        walk(&automation, &element, 0, &mut out, 1024);
+        Ok(out)
+    }
+}
+
+unsafe fn walk(
+    automation: &IUIAutomation,
+    element: &IUIAutomationElement,
+    depth: usize,
+    out: &mut Vec<UiNode>,
+    budget: usize,
+) {
+    if depth >= 16 || out.len() >= budget {
+        return;
+    }
+
+    let name = element
+        .CurrentName()
+        .ok()
+        .map(|b| b.to_string())
+        .unwrap_or_default();
+    let control_type = element
+        .CurrentControlType()
+        .map(|v| v.0)
+        .unwrap_or_default();
+    let role = control_type_to_role(control_type);
+    let bounds = element.CurrentBoundingRectangle().ok().map(|r| {
+        nerve_protocol::Bounds {
+            x: r.left,
+            y: r.top,
+            width: r.right - r.left,
+            height: r.bottom - r.top,
+        }
+    });
+    let enabled = element
+        .CurrentIsEnabled()
+        .map(|b: windows::Win32::Foundation::BOOL| b.as_bool())
+        .unwrap_or(false);
+    let focused = element
+        .CurrentHasKeyboardFocus()
+        .map(|b: windows::Win32::Foundation::BOOL| b.as_bool())
+        .unwrap_or(false);
+    out.push(UiNode {
+        role,
+        label: if name.is_empty() { None } else { Some(name) },
+        value: None,
+        bounds,
+        enabled,
+        focused,
+        children: Vec::new(),
+    });
+
+    // Enumerate direct children. We could use a TreeWalker; FindAll with a
+    // raw view + TreeScope_Children is simpler and cheaper for the typical
+    // foreground-app subtree.
+    let condition: IUIAutomationCondition = match automation.CreateTrueCondition() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let children: IUIAutomationElementArray =
+        match element.FindAll(TreeScope_Children, &condition) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+    let n = children.Length().unwrap_or(0);
+    for i in 0..n {
+        if out.len() >= budget {
+            return;
+        }
+        if let Ok(child) = children.GetElement(i) {
+            walk(automation, &child, depth + 1, out, budget);
+        }
+    }
+}
+
+/// Translate a UIA ControlType id into the role string the rest of Nerve
+/// uses (matches macOS AXRole / AT-SPI role conventions where possible).
+fn control_type_to_role(id: i32) -> String {
+    match id {
+        50000 => "button",
+        50001 => "calendar",
+        50002 => "checkbox",
+        50003 => "combobox",
+        50004 => "edit",
+        50005 => "hyperlink",
+        50006 => "image",
+        50007 => "listitem",
+        50008 => "list",
+        50009 => "menu",
+        50010 => "menubar",
+        50011 => "menuitem",
+        50012 => "progressbar",
+        50013 => "radiobutton",
+        50014 => "scrollbar",
+        50015 => "slider",
+        50016 => "spinner",
+        50017 => "statusbar",
+        50018 => "tab",
+        50019 => "tabitem",
+        50020 => "text",
+        50021 => "toolbar",
+        50022 => "tooltip",
+        50023 => "tree",
+        50024 => "treeitem",
+        50026 => "group",
+        50027 => "thumb",
+        50028 => "datagrid",
+        50029 => "dataitem",
+        50030 => "document",
+        50031 => "splitbutton",
+        50032 => "window",
+        50033 => "pane",
+        50034 => "header",
+        50035 => "headeritem",
+        50036 => "table",
+        50037 => "titlebar",
+        50038 => "separator",
+        50039 => "semanticzoom",
+        50040 => "appbar",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Integrity-level probes
+// ---------------------------------------------------------------------------
+
 /// True when the foreground window runs at a higher integrity level than us
 /// — in which case `SendInput` will be UIPI-dropped silently and we should
 /// refuse to dispatch input rather than lie about success.
@@ -186,6 +369,25 @@ pub fn target_higher_integrity() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_type_to_role_maps_known_ids() {
+        assert_eq!(control_type_to_role(50000), "button");
+        assert_eq!(control_type_to_role(50004), "edit");
+        assert_eq!(control_type_to_role(50032), "window");
+        assert_eq!(control_type_to_role(50011), "menuitem");
+        // Unknown ids fall through cleanly.
+        assert_eq!(control_type_to_role(99999), "unknown");
+    }
+
+    #[test]
+    fn init_com_is_idempotent() {
+        // Should not panic on repeated calls even though COM is
+        // single-init-per-thread.
+        init_com();
+        init_com();
+        init_com();
+    }
 
     /// Round-trip a Unicode string through `send_unicode` to a hidden window
     /// and assert the WM_CHAR sequence we receive matches the input.
