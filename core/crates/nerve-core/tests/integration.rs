@@ -23,11 +23,20 @@ fn free_port() -> u16 {
 }
 
 async fn boot_daemon(dry_run: bool) -> (Arc<tokio::task::JoinHandle<()>>, u16) {
+    boot_daemon_with_token(dry_run, None).await
+}
+
+async fn boot_daemon_with_token(
+    dry_run: bool,
+    auth_token: Option<&str>,
+) -> (Arc<tokio::task::JoinHandle<()>>, u16) {
     let port = free_port();
     let mut cfg = DaemonConfig::default();
     cfg.bind = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let tmp = tempfile::tempdir().unwrap();
     cfg.log_dir = tmp.path().to_path_buf();
+    cfg.auth_token = auth_token.map(|s| s.to_string());
+    cfg.telemetry.prometheus = false; // tests share a process — only one global recorder
     cfg.default_policy = SafetyPolicy {
         dry_run,
         ..SafetyPolicy::default()
@@ -36,12 +45,11 @@ async fn boot_daemon(dry_run: bool) -> (Arc<tokio::task::JoinHandle<()>>, u16) {
     let handle = tokio::spawn(async move {
         let _ = rt.start().await;
     });
-    // Wait for the bind to be open.
-    for _ in 0..100 {
+    for _ in 0..200 {
         if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     (Arc::new(handle), port)
 }
