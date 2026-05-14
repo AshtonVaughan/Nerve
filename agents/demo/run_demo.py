@@ -1,34 +1,46 @@
 """End-to-end Nerve demo.
 
-Runs the mock agent through a small synthetic task. The demo is deliberately
-gentle on the host — by default it runs in **dry-run** mode so it can be
-executed on CI machines without permission to drive the actual UI. Pass
-``--live`` to disable dry-run.
+Runs an agent through a small synthetic task list. The demo is gentle by
+default: it picks the MockAgent and runs in dry-run mode so the daemon
+makes no OS calls, which means it works on CI / sandboxes without input
+permissions.
 
-Usage:
+Pass ``--adapter anthropic`` or ``--adapter openai`` to drive a real
+model. Pass ``--live`` to turn dry-run off (which lets the daemon
+actually move the mouse / type / click).
+
+Usage::
 
     # one-shot demo against an already-running daemon
     python -m agents.demo.run_demo
 
-    # run live (will move your mouse / type into the focused window!)
+    # run live with the mock (will move your mouse / type into the focused window!)
     python -m agents.demo.run_demo --live
 
-    # spawn the daemon for the duration of the demo
+    # spawn the daemon for the duration of the demo and use the mock
     python -m agents.demo.run_demo --auto-start --live
+
+    # Use the real Anthropic Computer Use adapter (requires ANTHROPIC_API_KEY)
+    ANTHROPIC_API_KEY=sk-ant-... \
+        python -m agents.demo.run_demo --adapter anthropic --auto-start --live
+
+    # OpenAI Computer Use Preview (requires OPENAI_API_KEY)
+    OPENAI_API_KEY=sk-... \
+        python -m agents.demo.run_demo --adapter openai --auto-start --live
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SDK_PATH = REPO_ROOT / "sdks" / "python"
@@ -41,6 +53,8 @@ from nerve import NerveClient  # noqa: E402
 from nerve.types import SafetyPolicy  # noqa: E402
 
 from agents import AdapterState, MockAgent  # noqa: E402
+from agents.anthropic import AnthropicComputerUseAdapter  # noqa: E402
+from agents.openai import OpenAICuaAdapter  # noqa: E402
 
 
 DEMO_TASKS = [
@@ -49,6 +63,26 @@ DEMO_TASKS = [
     "save the file",
     "look at the clipboard",
 ]
+
+
+# Adapter selection table. Each entry is a tuple of
+#   (factory, required env-var-or-None, friendly name)
+# so we can fail loud at *startup* when the user picked an adapter whose
+# credentials aren't present, instead of mid-loop where the daemon has
+# already burned actions.
+ADAPTERS: dict[str, tuple] = {
+    "mock": (lambda: MockAgent(), None, "MockAgent"),
+    "anthropic": (
+        lambda: AnthropicComputerUseAdapter(),
+        "ANTHROPIC_API_KEY",
+        "AnthropicComputerUseAdapter",
+    ),
+    "openai": (
+        lambda: OpenAICuaAdapter(),
+        "OPENAI_API_KEY",
+        "OpenAICuaAdapter",
+    ),
+}
 
 
 def find_nerve_binary() -> Optional[str]:
@@ -84,8 +118,6 @@ def auto_start_daemon(dry_run: bool) -> subprocess.Popen:
     # Give the WS listener a moment to bind.
     for _ in range(40):
         try:
-            import socket
-
             with socket.create_connection(("127.0.0.1", 8765), timeout=0.25):
                 return proc
         except OSError:
@@ -93,32 +125,67 @@ def auto_start_daemon(dry_run: bool) -> subprocess.Popen:
     raise RuntimeError("daemon never started accepting connections")
 
 
+def resolve_adapter(name: str):
+    """Instantiate the chosen adapter or fail loud with a clear error."""
+    if name not in ADAPTERS:
+        raise SystemExit(
+            f"unknown adapter {name!r}; valid choices: {', '.join(sorted(ADAPTERS))}"
+        )
+    factory, required_env, friendly = ADAPTERS[name]
+    if required_env and not os.environ.get(required_env):
+        raise SystemExit(
+            f"adapter {name!r} requires the {required_env} environment variable. "
+            f"Set it and re-run, or pick --adapter mock."
+        )
+    print(f"[demo] using adapter: {friendly}")
+    return factory()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the Nerve demo agent.")
     parser.add_argument("--live", action="store_true", help="disable dry-run mode")
     parser.add_argument(
-        "--auto-start", action="store_true", help="spawn the daemon for the duration of the demo"
+        "--auto-start",
+        action="store_true",
+        help="spawn the daemon for the duration of the demo",
+    )
+    parser.add_argument(
+        "--adapter",
+        choices=sorted(ADAPTERS),
+        default="mock",
+        help="model adapter to drive the demo (default: mock)",
     )
     args = parser.parse_args()
+
+    # Validate credentials before we boot the daemon so failure is fast and
+    # cheap, not after the user has already paid for an OS-level grant.
+    agent = resolve_adapter(args.adapter)
 
     daemon_proc: Optional[subprocess.Popen] = None
     if args.auto_start:
         daemon_proc = auto_start_daemon(dry_run=not args.live)
 
-    agent = MockAgent()
     client = NerveClient()
     policy = SafetyPolicy(dry_run=not args.live, max_actions_per_minute=240)
     try:
         session = client.connect(policy=policy)
         print(f"[demo] connected, session {session}")
         caps = client.get_capabilities()
-        print(f"[demo] platform={caps.platform} ax={caps.has_accessibility} wayland_limited={caps.wayland_limited}")
+        print(
+            f"[demo] platform={caps.platform} ax={caps.has_accessibility} "
+            f"wayland_limited={caps.wayland_limited}"
+        )
 
         for task in DEMO_TASKS:
             print(f"[demo] task: {task}")
             state = AdapterState(task=task)
             while not state.done:
-                obs = client.get_observation(include_screenshot=False)
+                # Real adapters need the screenshot to ground their next
+                # decision; MockAgent doesn't, but the cost is small enough
+                # that we always include it when not mock.
+                obs = client.get_observation(
+                    include_screenshot=args.adapter != "mock"
+                )
                 actions = agent.plan(obs.raw, state)
                 if not actions:
                     break
@@ -127,6 +194,10 @@ def main() -> int:
                     state.history.append({"id": r.id, "method": r.method, "ok": r.ok})
                     flag = "ok" if r.ok else f"err({r.error})"
                     print(f"        -> {r.method} {flag}")
+                # Real model adapters drive themselves; mock breaks after
+                # one step per task.
+                if args.adapter == "mock":
+                    state.done = True
 
         log = client.get_action_log(limit=50)
         print(f"[demo] audit log entries: {len(log)}")
