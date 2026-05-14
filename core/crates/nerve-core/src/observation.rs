@@ -39,11 +39,14 @@ pub async fn observe(
         screenshot_base64: None,
         screenshot_format: "png".to_string(),
         screenshot_hash: None,
+        monitors: Vec::new(),
     };
 
+    let capture_timeout = std::time::Duration::from_millis(2500);
+    let cap_result = tokio::time::timeout(capture_timeout, backend.capture_primary_screen()).await;
     if opts.include_screenshot {
-        match backend.capture_primary_screen().await {
-            Ok(captured) => {
+        match cap_result {
+            Ok(Ok(captured)) => {
                 screen.width = captured.width;
                 screen.height = captured.height;
                 screen.scale_factor = captured.scale_factor;
@@ -53,23 +56,51 @@ pub async fn observe(
                 screen.screenshot_base64 =
                     Some(base64::engine::general_purpose::STANDARD.encode(&captured.png_bytes));
             }
-            Err(e) => warn!("screen capture failed: {e}"),
+            Ok(Err(e)) => warn!("screen capture failed: {e}"),
+            Err(_) => warn!("screen capture timed out"),
         }
-    } else {
-        // We still want width/height even without the pixel payload.
-        if let Ok(captured) = backend.capture_primary_screen().await {
-            // Avoid copying the bytes payload back.
-            screen.width = captured.width;
-            screen.height = captured.height;
-            screen.scale_factor = captured.scale_factor;
-            screen.screenshot_hash = Some(sha256_hex(&captured.png_bytes));
-        }
+    } else if let Ok(Ok(captured)) = cap_result {
+        screen.width = captured.width;
+        screen.height = captured.height;
+        screen.scale_factor = captured.scale_factor;
+        screen.screenshot_hash = Some(sha256_hex(&captured.png_bytes));
     }
 
-    let cursor = backend.cursor_position().await.unwrap_or_default();
-    let active_window = backend.active_window().await.unwrap_or(None);
+    let monitors = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        backend.monitors(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or_default();
+    screen.monitors = monitors;
+
+    let cursor = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        backend.cursor_position(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .unwrap_or_default();
+    let active_window = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        backend.active_window(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .flatten();
     let ui_tree = if opts.include_ui_tree {
-        backend.ui_tree().await.unwrap_or_default()
+        tokio::time::timeout(
+            std::time::Duration::from_millis(2500),
+            backend.ui_tree(),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default()
     } else {
         vec![]
     };
@@ -93,6 +124,7 @@ pub async fn observe(
         ocr: vec![],
         focused_element: None,
         last_action: None,
+        dirty_tiles: vec![],
         visual_diff: None,
         safety_state,
     }

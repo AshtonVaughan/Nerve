@@ -57,6 +57,13 @@ pub enum LowLevelAction {
         text: String,
         /// milliseconds between keystrokes; None = as fast as the backend allows.
         delay_ms: Option<u64>,
+        /// When true, the daemon writes the text to the clipboard and issues
+        /// the OS-appropriate paste hotkey (Cmd/Ctrl+V) instead of typing key
+        /// by key. This is required for Unicode / CJK / IME-bound text that
+        /// the OS keyboard layout cannot synthesise directly. Defaults to
+        /// false so callers stay in control of which path runs.
+        #[serde(default)]
+        unicode_paste: bool,
     },
     KeyPress { key: String },
     Hotkey { keys: Vec<String> },
@@ -112,6 +119,12 @@ pub struct ActionEnvelope {
     pub action: AnyAction,
     /// Optional client-side note that ends up in the audit log.
     pub note: Option<String>,
+    /// Idempotency key — if the daemon has seen this same value for the
+    /// current session, it returns the cached [`ActionResult`] instead of
+    /// executing the action again. Lets SDKs retry on transient errors
+    /// without risk of a double click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 /// How the daemon ultimately fulfilled an action.

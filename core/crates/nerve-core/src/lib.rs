@@ -12,15 +12,20 @@
 
 pub mod actions;
 pub mod audit;
+pub mod browser;
 pub mod compiler;
 pub mod config;
+pub mod diff;
 pub mod errors;
+pub mod metrics;
 pub mod observation;
+pub mod ocr;
 pub mod platform;
 pub mod runtime;
 pub mod safety;
 pub mod server;
 pub mod session;
+pub mod tls;
 
 pub use errors::NerveError;
 pub use runtime::Runtime;

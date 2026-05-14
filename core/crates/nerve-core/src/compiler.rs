@@ -111,15 +111,30 @@ impl Compiler {
                 )
                 .await
             }
-            SemanticAction::TypeIntoFocusedElement { text } => Ok(CompiledPlan {
-                method: ExecutionMethod::Keyboard,
-                primitive: Some(LowLevelAction::TypeText {
-                    text: text.clone(),
-                    delay_ms: None,
-                }),
-                attempted: vec![ExecutionMethod::AccessibilityAction, ExecutionMethod::Keyboard],
-                trace: vec![format!("type into focused element, {} chars", text.len())],
-            }),
+            SemanticAction::TypeIntoFocusedElement { text } => {
+                // If the text contains code points outside the ASCII range, use
+                // the clipboard-paste path so we don't depend on the user's
+                // keyboard layout.
+                let needs_unicode = text.chars().any(|c| !c.is_ascii());
+                Ok(CompiledPlan {
+                    method: if needs_unicode {
+                        ExecutionMethod::Clipboard
+                    } else {
+                        ExecutionMethod::Keyboard
+                    },
+                    primitive: Some(LowLevelAction::TypeText {
+                        text: text.clone(),
+                        delay_ms: None,
+                        unicode_paste: needs_unicode,
+                    }),
+                    attempted: vec![ExecutionMethod::AccessibilityAction, ExecutionMethod::Keyboard],
+                    trace: vec![format!(
+                        "type into focused element, {} chars, unicode_paste={}",
+                        text.len(),
+                        needs_unicode
+                    )],
+                })
+            }
             SemanticAction::FindTextOnScreen { text } => Ok(CompiledPlan {
                 method: ExecutionMethod::OcrBoundingBox,
                 primitive: Some(LowLevelAction::Screenshot),

@@ -150,6 +150,13 @@ export interface ActionEnvelope {
   id: string;
   action: AnyAction;
   note?: string;
+  idempotency_key?: string;
+}
+
+export interface ProtocolVersion {
+  major: number;
+  minor: number;
+  patch: number;
 }
 
 export type ExecutionMethod =
@@ -206,11 +213,20 @@ export interface AuditEntry {
 }
 
 export type ClientMessage =
-  | { kind: "session_start"; request_id: string; client_name?: string; client_version?: string; session_id?: string; policy?: SafetyPolicy }
+  | {
+      kind: "session_start";
+      request_id: string;
+      client_name?: string;
+      client_version?: string;
+      client_protocol_version?: ProtocolVersion;
+      auth_token?: string;
+      session_id?: string;
+      policy?: SafetyPolicy;
+    }
   | { kind: "session_stop"; request_id: string }
   | { kind: "get_capabilities"; request_id: string }
   | { kind: "get_observation"; request_id: string; include_screenshot?: boolean; include_ui_tree?: boolean }
-  | { kind: "subscribe_observations"; request_id: string; interval_ms: number; include_screenshot?: boolean }
+  | { kind: "subscribe_observations"; request_id: string; interval_ms: number; include_screenshot?: boolean; cursor_only?: boolean; delta_frames?: boolean }
   | { kind: "unsubscribe_observations"; request_id: string }
   | { kind: "execute_action"; request_id: string; action: ActionEnvelope }
   | { kind: "execute_action_batch"; request_id: string; actions: ActionEnvelope[]; stop_on_error: boolean }
@@ -222,7 +238,15 @@ export type ClientMessage =
   | { kind: "ping"; request_id: string; nonce: number };
 
 export type ServerMessage =
-  | { kind: "hello"; protocol_version: string; daemon_version: string; platform: Platform; session_id: string }
+  | {
+      kind: "hello";
+      protocol_version: string;
+      protocol_version_struct?: ProtocolVersion;
+      daemon_version: string;
+      platform: Platform;
+      session_id: string;
+      auth_required?: boolean;
+    }
   | { kind: "session_started"; request_id: string; session_id: string; capabilities: Capabilities }
   | { kind: "session_stopped"; request_id: string; session_id: string }
   | { kind: "capabilities"; request_id: string; capabilities: Capabilities }
@@ -236,4 +260,18 @@ export type ServerMessage =
   | { kind: "replay_progress"; request_id: string; step: number; total: number; entry: AuditEntry }
   | { kind: "replay_complete"; request_id: string; session_id: string }
   | { kind: "pong"; request_id: string; nonce: number }
-  | { kind: "error"; request_id: string | null; code: string; message: string };
+  | {
+      kind: "cursor_tick";
+      request_id: string | null;
+      timestamp: string;
+      cursor: CursorPosition;
+      active_window: string | null;
+    }
+  | {
+      kind: "error";
+      request_id: string | null;
+      code: string;
+      message: string;
+      retryable?: boolean;
+      retry_after_ms?: number;
+    };

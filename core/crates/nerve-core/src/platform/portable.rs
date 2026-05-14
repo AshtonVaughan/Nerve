@@ -62,6 +62,15 @@ impl PortableBackend {
             }
             EnigoState::Ready(_) => {}
             EnigoState::Pending => {
+                // Short-circuit on headless Linux/macOS hosts so we never
+                // block waiting for an X11 / Wayland connection that will
+                // never come.
+                if is_headless() {
+                    *guard = EnigoState::Failed("no display server detected".into());
+                    return Err(NerveError::Backend(
+                        "input backend unavailable: no display server detected".into(),
+                    ));
+                }
                 let settings = enigo::Settings::default();
                 match enigo::Enigo::new(&settings) {
                     Ok(inst) => *guard = EnigoState::Ready(inst),
@@ -148,6 +157,10 @@ impl PlatformBackend for PortableBackend {
         if *self.screen_capture_disabled.lock() {
             return Err(NerveError::Backend("screen capture disabled".into()));
         }
+        if is_headless() {
+            *self.screen_capture_disabled.lock() = true;
+            return Err(NerveError::Backend("no display server".into()));
+        }
         let disabled = self.screen_capture_disabled.clone();
         let captured = tokio::task::spawn_blocking(move || -> Result<CapturedScreen> {
             let monitors = xcap::Monitor::all()
@@ -180,6 +193,35 @@ impl PlatformBackend for PortableBackend {
         Ok(captured)
     }
 
+    async fn monitors(&self) -> Result<Vec<nerve_protocol::Monitor>> {
+        if is_headless() {
+            return Ok(Vec::new());
+        }
+        let mons = tokio::task::spawn_blocking(|| -> Result<Vec<nerve_protocol::Monitor>> {
+            let raw = xcap::Monitor::all()
+                .map_err(|e| NerveError::Backend(format!("xcap monitors: {e}")))?;
+            let mut out = Vec::new();
+            for (i, m) in raw.into_iter().enumerate() {
+                out.push(nerve_protocol::Monitor {
+                    index: i as u32,
+                    name: m.name().to_string(),
+                    bounds: nerve_protocol::Bounds {
+                        x: m.x() as i32,
+                        y: m.y() as i32,
+                        width: m.width() as i32,
+                        height: m.height() as i32,
+                    },
+                    scale_factor: m.scale_factor(),
+                    is_primary: m.is_primary(),
+                });
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| NerveError::Backend(format!("monitors join: {e}")))??;
+        Ok(mons)
+    }
+
     async fn cursor_position(&self) -> Result<CursorPosition> {
         // enigo's `Mouse::location` is the standard cross-platform way.
         let pos = tokio::task::block_in_place(|| -> Result<CursorPosition> {
@@ -195,6 +237,9 @@ impl PlatformBackend for PortableBackend {
     }
 
     async fn active_window(&self) -> Result<Option<ActiveWindow>> {
+        if is_headless() {
+            return Ok(None);
+        }
         let result = tokio::task::spawn_blocking(|| -> Result<Option<ActiveWindow>> {
             let windows = xcap::Window::all()
                 .map_err(|e| NerveError::Backend(format!("xcap windows: {e}")))?;
@@ -506,6 +551,31 @@ fn parse_key(key: &str) -> Result<enigo::Key> {
         }
     };
     Ok(mapped)
+}
+
+/// Returns true when the daemon is running on a Unix host without a display
+/// server. We use this to refuse to call into enigo (which would block the
+/// process on X11 connection attempts).
+pub fn is_headless() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let has_x11 = std::env::var("DISPLAY").map(|s| !s.is_empty()).unwrap_or(false);
+        let has_wayland = std::env::var("WAYLAND_DISPLAY")
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        return !has_x11 && !has_wayland;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS has a window server unless we're in a sandboxed sshd shell.
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return false;
+    }
+    #[allow(unreachable_code)]
+    false
 }
 
 fn detect_wayland_limited() -> bool {

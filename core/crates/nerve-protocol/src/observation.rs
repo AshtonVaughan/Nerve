@@ -64,6 +64,20 @@ pub struct Screen {
     /// re-decoding the base64 payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot_hash: Option<String>,
+    /// Per-monitor descriptors. The first entry is the primary monitor.
+    /// Bounds are in virtual-desktop coordinates so an agent can issue clicks
+    /// outside the primary display without needing extra translation.
+    #[serde(default)]
+    pub monitors: Vec<Monitor>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Monitor {
+    pub index: u32,
+    pub name: String,
+    pub bounds: Bounds,
+    pub scale_factor: f32,
+    pub is_primary: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -116,9 +130,13 @@ pub struct Observation {
     pub ocr: Vec<OcrFragment>,
     pub focused_element: Option<UiNode>,
     pub last_action: Option<String>,
-    /// Reserved for diff stream support. None for now.
-    pub visual_diff: Option<serde_json::Value>,
+    /// Coarse "what changed since last tick" tile bounds. Populated when the
+    /// observation was produced for a `delta_frames` subscription.
+    #[serde(default)]
+    pub dirty_tiles: Vec<Bounds>,
     pub safety_state: SafetyState,
+    /// Reserved for future visual diff payloads (e.g. JPEG patches).
+    pub visual_diff: Option<serde_json::Value>,
 }
 
 /// Capabilities advertised by the daemon. Lets agents and SDKs degrade

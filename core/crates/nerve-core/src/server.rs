@@ -22,11 +22,12 @@ use axum::Router;
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
+use ::metrics::{counter, gauge, histogram};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 use uuid::Uuid;
 
-use nerve_protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
+use nerve_protocol::{ClientMessage, ErrorCode, ProtocolVersion, ServerMessage, PROTOCOL_VERSION};
 
 use crate::observation::{observe, ObserveOpts};
 use crate::runtime::{Runtime, RuntimeEvent};
@@ -77,6 +78,7 @@ impl WsServer {
             .route("/api/sessions", get(api_sessions))
             .route("/api/version", get(api_version))
             .route("/healthz", get(healthz))
+            .route("/metrics", get(metrics_endpoint))
             .fallback(not_found)
             .with_state(state);
 
@@ -146,6 +148,21 @@ async fn healthz() -> Response {
     (StatusCode::OK, "ok").into_response()
 }
 
+async fn metrics_endpoint() -> Response {
+    match crate::metrics::render_prometheus() {
+        Some(body) => (
+            [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+            body,
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "metrics not installed (set telemetry.prometheus = true)",
+        )
+            .into_response(),
+    }
+}
+
 async fn not_found() -> Response {
     (StatusCode::NOT_FOUND, "not found").into_response()
 }
@@ -155,7 +172,10 @@ async fn not_found() -> Response {
 impl WsServer {
     async fn handle_socket(self: Arc<Self>, socket: WebSocket, addr: SocketAddr) {
         info!(%addr, "websocket client connected");
+        counter!("nerve_ws_connections_total").increment(1);
         *self.runtime.bus.connected_clients.write() += 1;
+        gauge!("nerve_ws_connections_active")
+            .set(*self.runtime.bus.connected_clients.read() as f64);
         let _ = self.runtime.bus.events.send(RuntimeEvent::ClientConnected);
 
         let (mut sink, mut stream) = socket.split();
@@ -165,9 +185,11 @@ impl WsServer {
         out_tx
             .send(ServerMessage::Hello {
                 protocol_version: PROTOCOL_VERSION.to_string(),
+                protocol_version_struct: Some(ProtocolVersion::CURRENT),
                 daemon_version: crate::DAEMON_VERSION.to_string(),
                 platform: self.runtime.backend.platform(),
                 session_id: connection_id.clone(),
+                auth_required: self.runtime.config.auth_token.is_some(),
             })
             .await
             .ok();
@@ -221,21 +243,21 @@ impl WsServer {
                     }
                     Err(e) => {
                         let _ = out_tx
-                            .send(ServerMessage::Error {
-                                request_id: None,
-                                code: "bad_request".into(),
-                                message: format!("parse: {e}"),
-                            })
+                            .send(ServerMessage::error(
+                                None,
+                                ErrorCode::BadRequest,
+                                format!("parse: {e}"),
+                            ))
                             .await;
                     }
                 },
                 Message::Binary(_) => {
                     let _ = out_tx
-                        .send(ServerMessage::Error {
-                            request_id: None,
-                            code: "unsupported".into(),
-                            message: "binary frames not supported".into(),
-                        })
+                        .send(ServerMessage::error(
+                            None,
+                            ErrorCode::Unsupported,
+                            "binary frames not supported",
+                        ))
                         .await;
                 }
                 Message::Close(_) => break,
@@ -257,6 +279,8 @@ impl WsServer {
             .connected_clients
             .read()
             .saturating_sub(1);
+        gauge!("nerve_ws_connections_active")
+            .set(*self.runtime.bus.connected_clients.read() as f64);
         let _ = self.runtime.bus.events.send(RuntimeEvent::ClientDisconnected);
         info!(%addr, "websocket client disconnected");
     }
@@ -278,9 +302,54 @@ impl WsServer {
                 request_id,
                 client_name,
                 client_version,
+                client_protocol_version,
+                auth_token,
                 session_id,
                 policy,
             } => {
+                // Version negotiation. If the client sent a structured version,
+                // refuse incompatible ones.
+                if let Some(cpv) = client_protocol_version {
+                    if !ProtocolVersion::CURRENT.compatible_with(cpv) {
+                        let _ = out_tx
+                            .send(ServerMessage::error(
+                                Some(request_id),
+                                ErrorCode::VersionMismatch,
+                                format!(
+                                    "client {cpv} incompatible with daemon {}",
+                                    ProtocolVersion::CURRENT
+                                ),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+                // Token auth.
+                if let Some(expected) = runtime.config.auth_token.as_deref() {
+                    match auth_token.as_deref() {
+                        None => {
+                            let _ = out_tx
+                                .send(ServerMessage::error(
+                                    Some(request_id),
+                                    ErrorCode::AuthRequired,
+                                    "daemon requires auth_token",
+                                ))
+                                .await;
+                            return;
+                        }
+                        Some(tok) if !constant_time_eq(tok.as_bytes(), expected.as_bytes()) => {
+                            let _ = out_tx
+                                .send(ServerMessage::error(
+                                    Some(request_id),
+                                    ErrorCode::AuthInvalid,
+                                    "invalid auth_token",
+                                ))
+                                .await;
+                            return;
+                        }
+                        Some(_) => {}
+                    }
+                }
                 let pol = policy.unwrap_or_else(|| runtime.config.default_policy.clone());
                 let session = match session_id {
                     Some(id) => Session::with_id(id, pol),
@@ -343,6 +412,8 @@ impl WsServer {
                 request_id,
                 interval_ms,
                 include_screenshot,
+                cursor_only,
+                delta_frames,
             } => {
                 let session = match ensure_session(active_session, out_tx, Some(request_id.clone())).await {
                     Some(s) => s,
@@ -350,30 +421,90 @@ impl WsServer {
                 };
                 let tx = out_tx.clone();
                 let backend = runtime.backend.clone();
-                let opts = ObserveOpts {
-                    include_screenshot: include_screenshot.unwrap_or(false),
-                    include_ui_tree: false,
-                };
                 let session_id = session.meta.id.clone();
                 let safety = session.safety.clone();
                 let req_id = request_id.clone();
-                tokio::spawn(async move {
-                    loop {
-                        let obs = observe(&backend, &safety, &session_id, opts).await;
-                        if tx
-                            .send(ServerMessage::Observation {
+                if cursor_only {
+                    // High-frequency cursor stream: just cursor + active window.
+                    // Use ~60Hz by default unless the caller picked something tighter.
+                    let interval = std::cmp::max(interval_ms, 16);
+                    tokio::spawn(async move {
+                        loop {
+                            let cursor = backend.cursor_position().await.unwrap_or_default();
+                            let active_window = backend
+                                .active_window()
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|w| w.app_name);
+                            // Skip a tick if the channel is full so we don't lock up.
+                            if let Err(e) = tx.try_send(ServerMessage::CursorTick {
+                                request_id: Some(req_id.clone()),
+                                timestamp: chrono::Utc::now(),
+                                cursor,
+                                active_window,
+                            }) {
+                                if matches!(e, tokio::sync::mpsc::error::TrySendError::Closed(_)) {
+                                    break;
+                                }
+                                // Full channel: drop frame, the client is behind.
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(interval)).await;
+                        }
+                    });
+                } else {
+                    let opts = ObserveOpts {
+                        include_screenshot: include_screenshot.unwrap_or(false),
+                        include_ui_tree: false,
+                    };
+                    let frame_cache = if delta_frames {
+                        Some(crate::diff::FrameCache::new())
+                    } else {
+                        None
+                    };
+                    tokio::spawn(async move {
+                        loop {
+                            let mut obs = observe(&backend, &safety, &session_id, opts).await;
+                            counter!("nerve_observations_total").increment(1);
+                            if obs.screen.screenshot_base64.is_some() {
+                                counter!("nerve_screenshots_total").increment(1);
+                            }
+                            // Delta-frame computation.
+                            if let Some(cache) = frame_cache.as_ref() {
+                                if let Ok(cap) = backend.capture_primary_screen().await {
+                                    let dirty = cache.diff_and_replace(
+                                        // xcap returns RGBA bytes; we only have PNG here.
+                                        // For a real fast path the backend should expose
+                                        // raw RGBA — for the MVP we hash the PNG bytes
+                                        // tile-wise as a stand-in.
+                                        &cap.png_bytes,
+                                        cap.width,
+                                        cap.height,
+                                        cap.png_bytes.clone(),
+                                    );
+                                    obs.dirty_tiles = crate::diff::coalesce(dirty);
+                                }
+                            }
+                            // Backpressure: try_send so a slow client never blocks the daemon.
+                            match tx.try_send(ServerMessage::Observation {
                                 request_id: Some(req_id.clone()),
                                 observation: obs,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(interval_ms.max(50)))
+                            }) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    // Drop this frame.
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                    break;
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                interval_ms.max(50),
+                            ))
                             .await;
-                    }
-                });
+                        }
+                    });
+                }
             }
             ClientMessage::UnsubscribeObservations { request_id: _ } => {
                 // The MVP runs one task per subscription and lets it die when
@@ -385,20 +516,45 @@ impl WsServer {
                     Some(s) => s,
                     None => return,
                 };
+                if let Some(key) = action.idempotency_key.as_ref() {
+                    if let Some(cached) = session.idempotency.get(key) {
+                        counter!("nerve_actions_total", "method" => "idempotent").increment(1);
+                        let _ = out_tx
+                            .send(ServerMessage::ActionResult {
+                                request_id,
+                                result: cached,
+                            })
+                            .await;
+                        return;
+                    }
+                }
+                let idempotency_key = action.idempotency_key.clone();
+                let started = std::time::Instant::now();
                 match runtime.executor.execute(&session, action).await {
                     Ok(result) => {
-                        *dashboard.last_action.write() = Some(format!("{:?}", result.method));
+                        let method = format!("{:?}", result.method);
+                        *dashboard.last_action.write() = Some(method.clone());
+                        counter!("nerve_actions_total", "method" => method.clone()).increment(1);
+                        if !result.ok {
+                            counter!("nerve_actions_failed_total", "method" => method).increment(1);
+                        }
+                        histogram!("nerve_action_latency_ms")
+                            .record(started.elapsed().as_secs_f64() * 1000.0);
+                        if let Some(k) = idempotency_key {
+                            session.idempotency.insert(k, result.clone());
+                        }
                         let _ = out_tx
                             .send(ServerMessage::ActionResult { request_id, result })
                             .await;
                     }
                     Err(e) => {
+                        counter!("nerve_actions_failed_total", "method" => "error").increment(1);
                         let _ = out_tx
-                            .send(ServerMessage::Error {
-                                request_id: Some(request_id),
-                                code: "action_failed".into(),
-                                message: e.to_string(),
-                            })
+                            .send(ServerMessage::error(
+                                Some(request_id),
+                                error_code_for(&e),
+                                e.to_string(),
+                            ))
                             .await;
                     }
                 }
@@ -414,9 +570,20 @@ impl WsServer {
                 };
                 let mut results = Vec::with_capacity(actions.len());
                 for a in actions {
+                    // Idempotency for batch members.
+                    if let Some(key) = a.idempotency_key.as_ref() {
+                        if let Some(cached) = session.idempotency.get(key) {
+                            results.push(cached);
+                            continue;
+                        }
+                    }
+                    let idempotency_key = a.idempotency_key.clone();
                     match runtime.executor.execute(&session, a).await {
                         Ok(r) => {
                             let ok = r.ok;
+                            if let Some(k) = idempotency_key {
+                                session.idempotency.insert(k, r.clone());
+                            }
                             results.push(r);
                             if !ok && stop_on_error {
                                 break;
@@ -424,11 +591,11 @@ impl WsServer {
                         }
                         Err(e) => {
                             let _ = out_tx
-                                .send(ServerMessage::Error {
-                                    request_id: Some(request_id.clone()),
-                                    code: "action_failed".into(),
-                                    message: e.to_string(),
-                                })
+                                .send(ServerMessage::error(
+                                    Some(request_id.clone()),
+                                    error_code_for(&e),
+                                    e.to_string(),
+                                ))
                                 .await;
                             if stop_on_error {
                                 return;
@@ -459,11 +626,11 @@ impl WsServer {
                     }
                     Err(e) => {
                         let _ = out_tx
-                            .send(ServerMessage::Error {
-                                request_id: Some(request_id),
-                                code: "log_read_failed".into(),
-                                message: e.to_string(),
-                            })
+                            .send(ServerMessage::error(
+                                Some(request_id),
+                                ErrorCode::LogIoError,
+                                e.to_string(),
+                            ))
                             .await;
                     }
                 }
@@ -478,11 +645,11 @@ impl WsServer {
                     Ok(e) => e,
                     Err(e) => {
                         let _ = out_tx
-                            .send(ServerMessage::Error {
-                                request_id: Some(request_id),
-                                code: "replay_read".into(),
-                                message: e.to_string(),
-                            })
+                            .send(ServerMessage::error(
+                                Some(request_id),
+                                ErrorCode::ReplayUnavailable,
+                                e.to_string(),
+                            ))
                             .await;
                         return;
                     }
@@ -562,16 +729,43 @@ async fn ensure_session(
 
 async fn no_session(out_tx: &mpsc::Sender<ServerMessage>, request_id: Option<String>) {
     let _ = out_tx
-        .send(ServerMessage::Error {
+        .send(ServerMessage::error(
             request_id,
-            code: "no_session".into(),
-            message: "call session_start before invoking actions".into(),
-        })
+            ErrorCode::NoSession,
+            "call session_start before invoking actions",
+        ))
         .await;
+}
+
+fn error_code_for(e: &crate::errors::NerveError) -> ErrorCode {
+    use crate::errors::NerveError as NE;
+    match e {
+        NE::Unsupported(_) => ErrorCode::Unsupported,
+        NE::PermissionDenied(_) => ErrorCode::PermissionDenied,
+        NE::SafetyRejected(_) => ErrorCode::SafetyRejected,
+        NE::RateLimited { .. } => ErrorCode::RateLimited,
+        NE::EmergencyStopped => ErrorCode::EmergencyStopped,
+        NE::ElementNotFound => ErrorCode::ElementNotFound,
+        NE::Io(_) => ErrorCode::LogIoError,
+        NE::Serde(_) => ErrorCode::BadRequest,
+        NE::Backend(_) | NE::Other(_) => ErrorCode::BackendFailure,
+    }
 }
 
 mod dashboard {
     pub const INDEX_HTML: &str = include_str!("../../../../dashboard/static/index.html");
     pub const APP_JS: &str = include_str!("../../../../dashboard/static/dashboard.js");
     pub const APP_CSS: &str = include_str!("../../../../dashboard/static/dashboard.css");
+}
+
+/// Timing-safe byte slice equality.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
 }

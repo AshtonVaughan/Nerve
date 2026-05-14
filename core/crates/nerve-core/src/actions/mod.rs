@@ -48,9 +48,7 @@ impl Executor {
         session: &Arc<Session>,
         env: ActionEnvelope,
     ) -> Result<ActionResult> {
-        let active_app_before = self
-            .backend
-            .active_window()
+        let active_app_before = with_timeout(self.backend.active_window(), 1500)
             .await
             .ok()
             .flatten()
@@ -105,15 +103,13 @@ impl Executor {
             }
         }
 
-        let active_app_after = self
-            .backend
-            .active_window()
+        let active_app_after = with_timeout(self.backend.active_window(), 1500)
             .await
             .ok()
             .flatten()
             .map(|w| w.app_name);
 
-        let cursor = self.backend.cursor_position().await.ok();
+        let cursor = with_timeout(self.backend.cursor_position(), 1500).await.ok();
         let mut action_result = match result {
             Ok(mut r) => {
                 r.cursor = cursor;
@@ -246,9 +242,30 @@ impl Executor {
                 self.backend.scroll(*x, *y, *delta_x, *delta_y).await?;
                 (ExecutionMethod::CoordinateClick, None)
             }
-            LowLevelAction::TypeText { text, delay_ms } => {
-                self.backend.type_text(text, *delay_ms).await?;
-                (ExecutionMethod::Keyboard, None)
+            LowLevelAction::TypeText {
+                text,
+                delay_ms,
+                unicode_paste,
+            } => {
+                if *unicode_paste {
+                    // Save the previous clipboard so we don't clobber it.
+                    let prev = self.backend.clipboard_get().await.ok();
+                    self.backend.clipboard_set(text).await?;
+                    let keys: Vec<String> = if cfg!(target_os = "macos") {
+                        vec!["meta".to_string(), "v".to_string()]
+                    } else {
+                        vec!["ctrl".to_string(), "v".to_string()]
+                    };
+                    self.backend.hotkey(&keys).await?;
+                    if let Some(prev) = prev {
+                        // Best-effort restore.
+                        let _ = self.backend.clipboard_set(&prev).await;
+                    }
+                    (ExecutionMethod::Clipboard, None)
+                } else {
+                    self.backend.type_text(text, *delay_ms).await?;
+                    (ExecutionMethod::Keyboard, None)
+                }
             }
             LowLevelAction::KeyPress { key } => {
                 self.backend.key_press(key).await?;
@@ -303,6 +320,18 @@ fn is_read_only(action: &AnyAction) -> bool {
                 | LowLevelAction::EmergencyStop
         ),
         AnyAction::Semantic(_) => false,
+    }
+}
+
+/// Run a backend future with a hard timeout. Returns `Err` on timeout so the
+/// caller can fall back instead of stalling the runtime.
+async fn with_timeout<F, T>(fut: F, ms: u64) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match tokio::time::timeout(std::time::Duration::from_millis(ms), fut).await {
+        Ok(v) => v,
+        Err(_) => Err(NerveError::Backend(format!("platform call timed out after {ms}ms"))),
     }
 }
 

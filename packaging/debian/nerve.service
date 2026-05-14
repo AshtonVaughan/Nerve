@@ -1,0 +1,12 @@
+[Unit]
+Description=Nerve agent runtime
+After=network.target graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/nerve start
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

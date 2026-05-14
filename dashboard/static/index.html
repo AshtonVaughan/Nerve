@@ -15,15 +15,21 @@
     </div>
     <div class="header-actions">
       <span id="platform-pill" class="pill">…</span>
+      <input id="auth-token" type="password" placeholder="auth token (if required)" />
       <button id="emergency-stop" class="danger">Emergency stop</button>
     </div>
   </header>
+
+  <div id="auth-banner" class="auth-banner hidden">
+    The daemon requires an auth token. Paste it above and press <kbd>Enter</kbd>.
+  </div>
 
   <main>
     <section class="panel screenshot">
       <h2>Live screen</h2>
       <div class="canvas-wrap">
         <img id="screenshot" alt="screen preview" />
+        <canvas id="dirty-overlay"></canvas>
         <div id="cursor-pip"></div>
       </div>
       <p class="caption">
@@ -63,10 +69,24 @@
       </table>
     </section>
 
+    <section class="panel policy">
+      <h2>Safety policy</h2>
+      <form id="policy-form">
+        <label><input type="checkbox" id="pf-dry"> dry-run</label>
+        <label><input type="checkbox" id="pf-confirm"> require confirmation</label>
+        <label><input type="checkbox" id="pf-takeover"> human takeover</label>
+        <label>max actions/min <input type="number" id="pf-rate" min="0" value="600" /></label>
+        <label>allowlist (comma-sep) <input type="text" id="pf-allow" /></label>
+        <label>blocklist (comma-sep) <input type="text" id="pf-block" /></label>
+        <button type="submit">Apply</button>
+      </form>
+    </section>
+
     <section class="panel replay">
-      <h2>Replay (placeholder)</h2>
-      <p>Pick a session to replay. The replay viewer ships in the next release.</p>
+      <h2>Replay</h2>
       <select id="replay-session"></select>
+      <button id="replay-btn">Replay 4x</button>
+      <div id="replay-log" class="replay-log"></div>
     </section>
   </main>
 
