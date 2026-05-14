@@ -1,0 +1,58 @@
+[package]
+name = "nerve-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Nerve daemon library: WebSocket server, platform backends, action executor, safety, audit."
+
+[features]
+default = ["screen-capture", "input", "clipboard"]
+screen-capture = []
+input = []
+clipboard = []
+# Reserved for platform-specific deep integrations that pull in heavier deps.
+macos-accessibility = []
+windows-uia = []
+linux-atspi = []
+
+[dependencies]
+nerve-protocol = { path = "../nerve-protocol" }
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+image.workspace = true
+sysinfo.workspace = true
+hostname.workspace = true
+once_cell.workspace = true
+async-trait.workspace = true
+dirs.workspace = true
+regex-lite = { workspace = true }
+http = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
+axum = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+arboard.workspace = true
+enigo.workspace = true
+xcap.workspace = true
+
+[dev-dependencies]
+tempfile = "3.13"
+
