@@ -155,13 +155,28 @@ required.
 ## Demo agent
 
 ```bash
-python -m agents.demo.run_demo --auto-start          # dry-run
+python -m agents.demo.run_demo --auto-start          # dry-run, mock agent
 python -m agents.demo.run_demo --auto-start --live   # live mode (will type!)
 ```
 
-The demo uses the deterministic [`MockAgent`](../agents/mock/__init__.py).
-Swap it for `OpenAICuaAdapter` / `AnthropicComputerUseAdapter` once the
-adapters are implemented.
+Pick an adapter with `--adapter`. The mock agent is deterministic and runs
+without any credentials; the real adapters need their respective API key
+set in the environment, and the demo refuses to start if the key is
+missing (so failure is immediate, not mid-loop):
+
+```bash
+# Anthropic Claude Computer Use
+ANTHROPIC_API_KEY=sk-ant-... \
+    python -m agents.demo.run_demo --adapter anthropic --auto-start --live
+
+# OpenAI Computer Use Preview
+OPENAI_API_KEY=sk-... \
+    python -m agents.demo.run_demo --adapter openai --auto-start --live
+```
+
+Available adapters: `mock` (default), `anthropic`, `openai`. Adapters for
+Gemini / Ollama / vLLM live in `agents/` but aren't wired into the demo
+runner yet.
 
 ## Benchmarks
 
