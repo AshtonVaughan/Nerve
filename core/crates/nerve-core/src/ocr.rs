@@ -8,7 +8,9 @@
 //! daemon working — the compiler's OCR ladder rung will simply find nothing
 //! and move on to coordinate fallback.
 
-use nerve_protocol::{Bounds, OcrFragment};
+#[cfg(feature = "ocr-tesseract")]
+use nerve_protocol::Bounds;
+use nerve_protocol::OcrFragment;
 
 #[cfg(feature = "ocr-tesseract")]
 pub fn extract(image_png: &[u8]) -> Vec<OcrFragment> {

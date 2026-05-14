@@ -12,6 +12,7 @@
 
 pub mod actions;
 pub mod audit;
+pub mod browser;
 pub mod compiler;
 pub mod config;
 pub mod diff;

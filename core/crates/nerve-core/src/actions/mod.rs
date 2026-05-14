@@ -242,9 +242,30 @@ impl Executor {
                 self.backend.scroll(*x, *y, *delta_x, *delta_y).await?;
                 (ExecutionMethod::CoordinateClick, None)
             }
-            LowLevelAction::TypeText { text, delay_ms } => {
-                self.backend.type_text(text, *delay_ms).await?;
-                (ExecutionMethod::Keyboard, None)
+            LowLevelAction::TypeText {
+                text,
+                delay_ms,
+                unicode_paste,
+            } => {
+                if *unicode_paste {
+                    // Save the previous clipboard so we don't clobber it.
+                    let prev = self.backend.clipboard_get().await.ok();
+                    self.backend.clipboard_set(text).await?;
+                    let keys: Vec<String> = if cfg!(target_os = "macos") {
+                        vec!["meta".to_string(), "v".to_string()]
+                    } else {
+                        vec!["ctrl".to_string(), "v".to_string()]
+                    };
+                    self.backend.hotkey(&keys).await?;
+                    if let Some(prev) = prev {
+                        // Best-effort restore.
+                        let _ = self.backend.clipboard_set(&prev).await;
+                    }
+                    (ExecutionMethod::Clipboard, None)
+                } else {
+                    self.backend.type_text(text, *delay_ms).await?;
+                    (ExecutionMethod::Keyboard, None)
+                }
             }
             LowLevelAction::KeyPress { key } => {
                 self.backend.key_press(key).await?;

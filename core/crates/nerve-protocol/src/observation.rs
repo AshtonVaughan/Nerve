@@ -64,6 +64,20 @@ pub struct Screen {
     /// re-decoding the base64 payload.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot_hash: Option<String>,
+    /// Per-monitor descriptors. The first entry is the primary monitor.
+    /// Bounds are in virtual-desktop coordinates so an agent can issue clicks
+    /// outside the primary display without needing extra translation.
+    #[serde(default)]
+    pub monitors: Vec<Monitor>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Monitor {
+    pub index: u32,
+    pub name: String,
+    pub bounds: Bounds,
+    pub scale_factor: f32,
+    pub is_primary: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

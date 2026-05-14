@@ -91,6 +91,9 @@ enum Cmd {
         text: String,
         #[arg(long)]
         delay_ms: Option<u64>,
+        /// Paste-style input for Unicode / CJK / IME-bound text.
+        #[arg(long)]
+        unicode_paste: bool,
     },
     /// Send a hotkey combo (e.g. `nerve hotkey ctrl+s`).
     Hotkey {
@@ -193,7 +196,9 @@ async fn main() -> Result<()> {
         Cmd::Screenshot { out } => screenshot(&cli.host, cli.port, &out).await,
         Cmd::Click { x, y, button } => click(&cli.host, cli.port, x, y, &button).await,
         Cmd::ClickText { text, app } => click_text(&cli.host, cli.port, text, app).await,
-        Cmd::Type { text, delay_ms } => type_text(&cli.host, cli.port, text, delay_ms).await,
+        Cmd::Type { text, delay_ms, unicode_paste } => {
+            type_text(&cli.host, cli.port, text, delay_ms, unicode_paste).await
+        }
         Cmd::Hotkey { combo } => hotkey(&cli.host, cli.port, &combo).await,
         Cmd::ClipboardGet => clipboard_get(&cli.host, cli.port).await,
         Cmd::ClipboardSet { text } => clipboard_set(&cli.host, cli.port, text).await,
@@ -439,11 +444,21 @@ async fn click_text(host: &str, port: u16, text: String, app: Option<String>) ->
     Ok(())
 }
 
-async fn type_text(host: &str, port: u16, text: String, delay_ms: Option<u64>) -> Result<()> {
+async fn type_text(
+    host: &str,
+    port: u16,
+    text: String,
+    delay_ms: Option<u64>,
+    unicode_paste: bool,
+) -> Result<()> {
     let mut c = CliClient::connect(host, port).await?;
     c.session_start().await?;
     let result = c
-        .execute(AnyAction::Low(LowLevelAction::TypeText { text, delay_ms }))
+        .execute(AnyAction::Low(LowLevelAction::TypeText {
+            text,
+            delay_ms,
+            unicode_paste,
+        }))
         .await?;
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())

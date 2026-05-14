@@ -12,7 +12,7 @@
 
 use async_trait::async_trait;
 
-use nerve_protocol::{ActiveWindow, Backends, Capabilities, CursorPosition, Platform, UiNode};
+use nerve_protocol::{ActiveWindow, Backends, Capabilities, CursorPosition, Monitor, Platform, UiNode};
 
 use crate::errors::Result;
 
@@ -46,6 +46,23 @@ pub trait PlatformBackend: Send + Sync {
     fn backends(&self) -> Backends;
 
     async fn capture_primary_screen(&self) -> Result<CapturedScreen>;
+    /// Enumerate connected monitors. Default impl returns a single
+    /// "primary" entry whose bounds match the primary screen capture.
+    async fn monitors(&self) -> Result<Vec<Monitor>> {
+        let cap = self.capture_primary_screen().await?;
+        Ok(vec![Monitor {
+            index: 0,
+            name: "primary".to_string(),
+            bounds: nerve_protocol::Bounds {
+                x: 0,
+                y: 0,
+                width: cap.width,
+                height: cap.height,
+            },
+            scale_factor: cap.scale_factor,
+            is_primary: true,
+        }])
+    }
     async fn cursor_position(&self) -> Result<CursorPosition>;
     async fn active_window(&self) -> Result<Option<ActiveWindow>>;
     async fn ui_tree(&self) -> Result<Vec<UiNode>>;
