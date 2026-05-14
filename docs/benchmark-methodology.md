@@ -10,7 +10,7 @@ Each benchmark task records ten metrics, defined to be agent-agnostic:
 
 | Metric                       | Definition |
 | ---------------------------- | ---------- |
-| `task_success`               | Did the resulting method sequence match the task's expected sequence (or, in MVP dry-run, did the pipeline complete without exceptions)? |
+| `task_success`               | Did the run satisfy the task's success oracle? In dry-run mode the oracle inspects the submitted action types (the daemon never touches the OS), so a task passes when it submitted every action without an `ok=false`. Tasks can override with a custom oracle in `benchmarks/harness/tasks.py`. |
 | `task_duration_ms`           | Wall-clock from harness start to last result. |
 | `model_calls`                | Calls into the model adapter. Zero for the mock agent; non-zero for production adapters. |
 | `action_count`               | Total actions submitted. |
@@ -69,6 +69,51 @@ To add a task:
 * `recovery_attempts` flags places where the compiler had to fall back —
   if the same task always exercises the OCR fallback, the accessibility
   story for that app is broken.
+
+## Cassette workflow
+
+Running a task end-to-end against a real model adapter (Anthropic CUA,
+OpenAI CUA) costs tokens and is non-deterministic. CI needs neither
+cost nor flake, so the harness supports a *cassette* mode that replays
+a recorded action sequence instead of asking the model live.
+
+Cassettes are plain JSON files under `benchmarks/cassettes/<task>.json`.
+The schema:
+
+```json
+{
+  "task": "clipboard_copy_paste",
+  "description": "...",
+  "recorded_with": "anthropic|openai|mock|static",
+  "recorded_at": 1714670000,
+  "actions": [ { "type": "...", ... }, ... ]
+}
+```
+
+Recording a cassette (requires the relevant API key):
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... \
+    python -m benchmarks.harness.record \
+        --task calculator_demo --adapter anthropic
+```
+
+Replaying every task that has a cassette in CI:
+
+```bash
+python -m benchmarks.harness.runner --auto-start --cassettes
+```
+
+Tasks without a cassette fall back to their static plan, so the same
+command runs the full suite either way. Today three tasks have
+cassettes and pass deterministically in CI:
+
+* `clipboard_copy_paste`
+* `calculator_demo`
+* `change_setting`
+
+Adding more is a matter of (a) writing a task definition with an
+`oracle` that's stable across runs and (b) recording the cassette.
 
 ## Limitations
 
