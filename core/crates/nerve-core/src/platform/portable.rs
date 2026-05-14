@@ -62,6 +62,15 @@ impl PortableBackend {
             }
             EnigoState::Ready(_) => {}
             EnigoState::Pending => {
+                // Short-circuit on headless Linux/macOS hosts so we never
+                // block waiting for an X11 / Wayland connection that will
+                // never come.
+                if is_headless() {
+                    *guard = EnigoState::Failed("no display server detected".into());
+                    return Err(NerveError::Backend(
+                        "input backend unavailable: no display server detected".into(),
+                    ));
+                }
                 let settings = enigo::Settings::default();
                 match enigo::Enigo::new(&settings) {
                     Ok(inst) => *guard = EnigoState::Ready(inst),
@@ -148,6 +157,10 @@ impl PlatformBackend for PortableBackend {
         if *self.screen_capture_disabled.lock() {
             return Err(NerveError::Backend("screen capture disabled".into()));
         }
+        if is_headless() {
+            *self.screen_capture_disabled.lock() = true;
+            return Err(NerveError::Backend("no display server".into()));
+        }
         let disabled = self.screen_capture_disabled.clone();
         let captured = tokio::task::spawn_blocking(move || -> Result<CapturedScreen> {
             let monitors = xcap::Monitor::all()
@@ -195,6 +208,9 @@ impl PlatformBackend for PortableBackend {
     }
 
     async fn active_window(&self) -> Result<Option<ActiveWindow>> {
+        if is_headless() {
+            return Ok(None);
+        }
         let result = tokio::task::spawn_blocking(|| -> Result<Option<ActiveWindow>> {
             let windows = xcap::Window::all()
                 .map_err(|e| NerveError::Backend(format!("xcap windows: {e}")))?;
@@ -506,6 +522,31 @@ fn parse_key(key: &str) -> Result<enigo::Key> {
         }
     };
     Ok(mapped)
+}
+
+/// Returns true when the daemon is running on a Unix host without a display
+/// server. We use this to refuse to call into enigo (which would block the
+/// process on X11 connection attempts).
+pub fn is_headless() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let has_x11 = std::env::var("DISPLAY").map(|s| !s.is_empty()).unwrap_or(false);
+        let has_wayland = std::env::var("WAYLAND_DISPLAY")
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        return !has_x11 && !has_wayland;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // macOS has a window server unless we're in a sandboxed sshd shell.
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return false;
+    }
+    #[allow(unreachable_code)]
+    false
 }
 
 fn detect_wayland_limited() -> bool {

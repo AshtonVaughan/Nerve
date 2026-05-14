@@ -87,4 +87,6 @@ xcap.workspace = true
 
 [dev-dependencies]
 tempfile = "3.13"
+futures-util = { workspace = true }
+tokio-tungstenite = { workspace = true }
 

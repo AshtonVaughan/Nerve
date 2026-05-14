@@ -35,6 +35,10 @@ interface ClientOptions {
   host?: string;
   port?: number;
   clientName?: string;
+  authToken?: string;
+  autoReconnect?: boolean;
+  reconnectInitialMs?: number;
+  reconnectMaxMs?: number;
   webSocketFactory?: (url: string) => Promise<WsLike>;
 }
 
@@ -76,32 +80,58 @@ async function defaultWsFactory(url: string): Promise<WsLike> {
 export class NerveClient {
   private url: string;
   private clientName: string;
+  private authToken: string | undefined;
+  private autoReconnect: boolean;
+  private reconnectInitialMs: number;
+  private reconnectMaxMs: number;
   private webSocketFactory: (url: string) => Promise<WsLike>;
   private ws: WsLike | null = null;
   private pending = new Map<string, (msg: ServerMessage) => void>();
   private observers = new Set<(msg: ServerMessage) => void>();
   private hello: ServerMessage | null = null;
   private sessionId: string | null = null;
+  private lastPolicy: SafetyPolicy | undefined;
 
   constructor(opts: ClientOptions = {}) {
     const host = opts.host ?? "127.0.0.1";
     const port = opts.port ?? 8765;
     this.url = `ws://${host}:${port}/`;
     this.clientName = opts.clientName ?? "nerve-typescript";
+    const envToken =
+      (typeof process !== "undefined" && (process as any).env?.NERVE_AUTH_TOKEN) || undefined;
+    this.authToken = opts.authToken ?? envToken;
+    this.autoReconnect = opts.autoReconnect ?? true;
+    this.reconnectInitialMs = opts.reconnectInitialMs ?? 500;
+    this.reconnectMaxMs = opts.reconnectMaxMs ?? 30_000;
     this.webSocketFactory = opts.webSocketFactory ?? defaultWsFactory;
   }
 
   async connect(policy?: SafetyPolicy): Promise<string> {
+    this.lastPolicy = policy;
+    let delay = this.reconnectInitialMs;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.connectOnce(policy);
+      } catch (e) {
+        if (!this.autoReconnect || attempt >= 8) {
+          throw e;
+        }
+        await new Promise((res) => setTimeout(res, delay));
+        delay = Math.min(delay * 2, this.reconnectMaxMs);
+      }
+    }
+  }
+
+  private async connectOnce(policy?: SafetyPolicy): Promise<string> {
     this.ws = await this.webSocketFactory(this.url);
     this.ws.addEventListener("message", (ev: any) => this.onMessage(String(ev.data)));
     this.ws.addEventListener("close", () => {
       for (const cb of this.pending.values()) {
-        cb({ kind: "error", request_id: null, code: "closed", message: "websocket closed" });
+        cb({ kind: "error", request_id: null, code: "closed", message: "websocket closed", retryable: true });
       }
       this.pending.clear();
     });
 
-    // Daemon sends Hello first. Wait for it.
     this.hello = await this.waitForUnsolicited(
       (m) => m.kind === "hello"
     );
@@ -109,8 +139,10 @@ export class NerveClient {
       kind: "session_start",
       client_name: this.clientName,
       client_version: "0.1.0",
+      client_protocol_version: { major: 0, minor: 1, patch: 0 },
+      auth_token: this.authToken,
       policy,
-    } as ClientMessage);
+    } as any);
     this.sessionId = resp.session_id;
     return resp.session_id;
   }
@@ -150,6 +182,7 @@ export class NerveClient {
   async *subscribeObservations(options?: {
     intervalMs?: number;
     includeScreenshot?: boolean;
+    deltaFrames?: boolean;
   }): AsyncIterableIterator<Observation> {
     const requestId = this.newRequestId();
     const queue: Observation[] = [];
@@ -173,7 +206,8 @@ export class NerveClient {
         request_id: requestId,
         interval_ms: options?.intervalMs ?? 500,
         include_screenshot: options?.includeScreenshot ?? false,
-      });
+        delta_frames: options?.deltaFrames ?? false,
+      } as any);
       while (true) {
         if (queue.length > 0) {
           yield queue.shift()!;
@@ -190,8 +224,59 @@ export class NerveClient {
     }
   }
 
-  async execute(action: AnyAction, note?: string): Promise<ActionResult> {
-    const envelope: ActionEnvelope = { id: `act_${crypto.randomUUID()}`, action, note };
+  async *subscribeCursor(options?: {
+    intervalMs?: number;
+  }): AsyncIterableIterator<{
+    timestamp: string;
+    cursor: { x: number; y: number };
+    activeWindow: string | null;
+  }> {
+    const requestId = this.newRequestId();
+    const queue: any[] = [];
+    let resolver: ((v: any) => void) | null = null;
+    const handler = (msg: ServerMessage) => {
+      if (msg.kind === "cursor_tick" && msg.request_id === requestId) {
+        const tick = { timestamp: msg.timestamp, cursor: msg.cursor, activeWindow: msg.active_window };
+        if (resolver) {
+          const r = resolver;
+          resolver = null;
+          r(tick);
+        } else {
+          queue.push(tick);
+        }
+      }
+    };
+    this.observers.add(handler);
+    try {
+      this.sendRaw({
+        kind: "subscribe_observations",
+        request_id: requestId,
+        interval_ms: options?.intervalMs ?? 16,
+        include_screenshot: false,
+        cursor_only: true,
+      } as any);
+      while (true) {
+        if (queue.length > 0) {
+          yield queue.shift()!;
+          continue;
+        }
+        yield await new Promise((res) => (resolver = res));
+      }
+    } finally {
+      this.observers.delete(handler);
+    }
+  }
+
+  async execute(
+    action: AnyAction,
+    options?: { note?: string; idempotencyKey?: string },
+  ): Promise<ActionResult> {
+    const envelope: ActionEnvelope = {
+      id: `act_${crypto.randomUUID()}`,
+      action,
+      note: options?.note,
+      idempotency_key: options?.idempotencyKey,
+    };
     const resp = await this.request<ServerMessage & { kind: "action_result" }>({
       kind: "execute_action",
       action: envelope,
