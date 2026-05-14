@@ -55,7 +55,11 @@ enum Cmd {
     /// Report whether the daemon is reachable.
     Status,
     /// Inspect the local machine and print what's wired up.
-    Doctor,
+    Doctor {
+        /// Emit machine-readable JSON instead of human-readable lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print daemon capabilities as JSON.
     Capabilities,
     /// Pretty-print a single observation.
@@ -188,7 +192,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Stop => stop(&cli.host, cli.port).await,
         Cmd::Status => status(&cli.host, cli.port).await,
-        Cmd::Doctor => doctor(&cli.host, cli.port).await,
+        Cmd::Doctor { json } => doctor(&cli.host, cli.port, json).await,
         Cmd::Capabilities => capabilities(&cli.host, cli.port).await,
         Cmd::Observe { with_screenshot, with_ui_tree } => {
             observe(&cli.host, cli.port, with_screenshot, with_ui_tree).await
@@ -311,24 +315,66 @@ async fn status(host: &str, port: u16) -> Result<()> {
     }
 }
 
-async fn doctor(host: &str, port: u16) -> Result<()> {
+async fn doctor(host: &str, port: u16, json: bool) -> Result<()> {
     use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
-    println!("OS:           {}", System::name().unwrap_or_else(|| "?".into()));
-    println!("Kernel:       {}", System::kernel_version().unwrap_or_else(|| "?".into()));
-    println!("Arch:         {}", std::env::consts::ARCH);
-    println!("Hostname:     {}", hostname::get().ok().and_then(|h| h.into_string().ok()).unwrap_or_else(|| "?".into()));
-    #[cfg(target_os = "linux")]
-    {
-        if std::env::var("WAYLAND_DISPLAY").is_ok() {
-            println!("Display:      Wayland (limited)");
-        } else if std::env::var("DISPLAY").is_ok() {
-            println!("Display:      X11");
-        } else {
-            println!("Display:      headless / not detected");
+    let os = System::name().unwrap_or_else(|| "?".into());
+    let kernel = System::kernel_version().unwrap_or_else(|| "?".into());
+    let arch = std::env::consts::ARCH;
+    let hostname_s = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "?".into());
+    let display: &str = {
+        #[cfg(target_os = "linux")]
+        {
+            if std::env::var("WAYLAND_DISPLAY").is_ok() {
+                "wayland"
+            } else if std::env::var("DISPLAY").is_ok() {
+                "x11"
+            } else {
+                "headless"
+            }
         }
+        #[cfg(target_os = "macos")]
+        {
+            "quartz"
+        }
+        #[cfg(target_os = "windows")]
+        {
+            "dwm"
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            "unknown"
+        }
+    };
+    if json {
+        let caps = match CliClient::connect(host, port).await {
+            Ok(mut c) => {
+                let _ = c.session_start().await;
+                c.capabilities().await.ok()
+            }
+            Err(_) => None,
+        };
+        let payload = serde_json::json!({
+            "os": os,
+            "kernel": kernel,
+            "arch": arch,
+            "hostname": hostname_s,
+            "display": display,
+            "daemon_reachable": caps.is_some(),
+            "capabilities": caps,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
     }
+    println!("OS:           {}", os);
+    println!("Kernel:       {}", kernel);
+    println!("Arch:         {}", arch);
+    println!("Hostname:     {}", hostname_s);
+    println!("Display:      {}", display);
 
     match CliClient::connect(host, port).await {
         Ok(mut c) => {
