@@ -145,12 +145,14 @@ class AsyncNerveClient:
         self,
         include_screenshot: bool = True,
         include_ui_tree: bool = False,
+        include_ocr: bool = False,
     ) -> Observation:
         resp = await self._request(
             {
                 "kind": "get_observation",
                 "include_screenshot": include_screenshot,
                 "include_ui_tree": include_ui_tree,
+                "include_ocr": include_ocr,
             }
         )
         self._check(resp)

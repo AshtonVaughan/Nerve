@@ -10,14 +10,48 @@ git clone https://github.com/ashtonvaughan/nerve.git
 cd nerve/core
 cargo build --release
 
+# Or with OCR (Tesseract-backed) wired into the action compiler's lowering
+# ladder, which lets `click_element_by_text` work even when the
+# accessibility tree is empty:
+cargo build --release --features ocr-tesseract
+
 # Run it.
 ./target/release/nerve start
 ```
 
-On Linux you may need to install build-time X11 deps first:
+On Linux you may need to install build-time X11 deps first. Add the
+Tesseract packages if you want the OCR rung:
 
 ```bash
 sudo apt install -y libxdo-dev libxtst-dev libxcb1-dev libdbus-1-dev
+# OCR (optional but recommended):
+sudo apt install -y libtesseract-dev libleptonica-dev tesseract-ocr-eng clang libclang-dev
+```
+
+On macOS:
+
+```bash
+brew install tesseract leptonica   # only if you want OCR
+```
+
+For the browser DOM bridge (lets `click_element { text }` resolve against
+the live DOM of a Chromium-family browser running with
+`--remote-debugging-port`), build with `--features browser-cdp`:
+
+```bash
+cargo build --release --features "ocr-tesseract browser-cdp"
+
+# Then launch Chrome / Edge / Brave with debugging:
+google-chrome --remote-debugging-port=9222 &
+# Override the port if you used something other than 9222:
+export NERVE_CDP_PORT=9333
+```
+
+To verify OCR landed, run:
+
+```bash
+./target/release/nerve capabilities | jq .ocr
+# => true   when built with --features ocr-tesseract
 ```
 
 ### Windows
@@ -134,13 +168,28 @@ required.
 ## Demo agent
 
 ```bash
-python -m agents.demo.run_demo --auto-start          # dry-run
+python -m agents.demo.run_demo --auto-start          # dry-run, mock agent
 python -m agents.demo.run_demo --auto-start --live   # live mode (will type!)
 ```
 
-The demo uses the deterministic [`MockAgent`](../agents/mock/__init__.py).
-Swap it for `OpenAICuaAdapter` / `AnthropicComputerUseAdapter` once the
-adapters are implemented.
+Pick an adapter with `--adapter`. The mock agent is deterministic and runs
+without any credentials; the real adapters need their respective API key
+set in the environment, and the demo refuses to start if the key is
+missing (so failure is immediate, not mid-loop):
+
+```bash
+# Anthropic Claude Computer Use
+ANTHROPIC_API_KEY=sk-ant-... \
+    python -m agents.demo.run_demo --adapter anthropic --auto-start --live
+
+# OpenAI Computer Use Preview
+OPENAI_API_KEY=sk-... \
+    python -m agents.demo.run_demo --adapter openai --auto-start --live
+```
+
+Available adapters: `mock` (default), `anthropic`, `openai`. Adapters for
+Gemini / Ollama / vLLM live in `agents/` but aren't wired into the demo
+runner yet.
 
 ## Benchmarks
 

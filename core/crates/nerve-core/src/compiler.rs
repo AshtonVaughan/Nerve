@@ -229,14 +229,40 @@ impl Compiler {
         }
 
         // 2. Native UI action — placeholder. Future: app-specific hooks
-        //    (TextEdit menu items, browser DOM via WebDriver, etc).
+        //    (TextEdit menu items, IME compose state, etc).
         attempted.push(ExecutionMethod::NativeUiAction);
         debug!(?app, "native UI action layer is a no-op in MVP");
 
-        // 3. Browser DOM adapter — placeholder.
+        // 3. Browser DOM adapter. When the active app is a Chromium-family
+        //    browser and the build has `--features browser-cdp`, ask
+        //    DevTools for the element by visible text.
         attempted.push(ExecutionMethod::BrowserDomAdapter);
+        if let (Some(app_name), Some(needle)) = (app, text) {
+            if crate::browser::enabled() {
+                if let Some(elem) = crate::browser::query_element(app_name, needle).await {
+                    let (cx, cy) = center(&elem.bounds);
+                    trace.push(format!(
+                        "cdp match app={:?} text={:?} bounds={:?} (page={})",
+                        app_name, needle, elem.bounds, elem.frame_url
+                    ));
+                    return Ok(CompiledPlan {
+                        method: ExecutionMethod::BrowserDomAdapter,
+                        primitive: Some(LowLevelAction::Click {
+                            x: cx,
+                            y: cy,
+                            button: MouseButton::Left,
+                        }),
+                        attempted: attempted.clone(),
+                        trace: trace.clone(),
+                    });
+                }
+                trace.push("cdp scan missed".into());
+            } else {
+                trace.push("cdp unavailable: build without browser-cdp feature".into());
+            }
+        }
 
-        // 4. OCR / bounds hint.
+        // 4. Caller-supplied bounds hint takes precedence over OCR.
         if let Some(b) = bounds_hint {
             attempted.push(ExecutionMethod::OcrBoundingBox);
             let (cx, cy) = center(&b);
@@ -253,7 +279,53 @@ impl Compiler {
             });
         }
 
-        // 5. Coordinate fallback. Without bounds we cannot click sensibly.
+        // 5. OCR rung: capture the screen and scan for `text`. Only worth
+        //    trying when the caller actually told us what text to find.
+        if let Some(needle) = text {
+            attempted.push(ExecutionMethod::OcrBoundingBox);
+            if crate::ocr::enabled() {
+                match self.backend.capture_primary_screen().await {
+                    Ok(captured) => {
+                        let png = captured.png_bytes.clone();
+                        let needle_owned = needle.to_string();
+                        let target_index = index;
+                        let join = tokio::task::spawn_blocking(move || {
+                            ocr_match(&png, &needle_owned, target_index)
+                        });
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), join).await
+                        {
+                            Ok(Ok(Some(bounds))) => {
+                                let (cx, cy) = center(&bounds);
+                                trace.push(format!(
+                                    "ocr match text={:?} bounds={:?} (index={})",
+                                    needle, bounds, target_index
+                                ));
+                                return Ok(CompiledPlan {
+                                    method: ExecutionMethod::OcrBoundingBox,
+                                    primitive: Some(LowLevelAction::Click {
+                                        x: cx,
+                                        y: cy,
+                                        button: MouseButton::Left,
+                                    }),
+                                    attempted: attempted.clone(),
+                                    trace: trace.clone(),
+                                });
+                            }
+                            Ok(Ok(None)) => trace.push(format!("ocr scan missed '{needle}'")),
+                            Ok(Err(e)) => trace.push(format!("ocr task join error: {e}")),
+                            Err(_) => trace.push("ocr scan timed out".into()),
+                        }
+                    }
+                    Err(e) => trace.push(format!("ocr screen capture failed: {e}")),
+                }
+            } else {
+                trace.push(
+                    "ocr unavailable: build without ocr-tesseract feature, skipping rung".into(),
+                );
+            }
+        }
+
+        // 6. Coordinate fallback would be unsafe — refuse to guess.
         attempted.push(ExecutionMethod::CoordinateClick);
         Err(NerveError::ElementNotFound)
     }
@@ -322,3 +394,97 @@ fn find_in_tree<'a>(
 fn center(b: &Bounds) -> (i32, i32) {
     (b.x + b.width / 2, b.y + b.height / 2)
 }
+
+/// Run OCR over the screenshot and return the bounds of the `n`th fragment
+/// whose text matches `needle` (case-insensitive, whole-word or substring).
+///
+/// `index = 0` picks the first match. Returns None when nothing matched.
+pub(crate) fn ocr_match(png: &[u8], needle: &str, index: usize) -> Option<Bounds> {
+    let fragments = crate::ocr::extract(png);
+    let lc = needle.to_lowercase();
+    let mut hits = fragments.into_iter().filter(|f| {
+        let t = f.text.to_lowercase();
+        t == lc || t.contains(&lc)
+    });
+    hits.nth(index).map(|f| f.bounds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nerve_protocol::UiNode;
+
+    fn node(role: &str, label: Option<&str>, b: (i32, i32, i32, i32)) -> UiNode {
+        UiNode {
+            role: role.into(),
+            label: label.map(|s| s.into()),
+            value: None,
+            bounds: Some(Bounds {
+                x: b.0,
+                y: b.1,
+                width: b.2,
+                height: b.3,
+            }),
+            enabled: true,
+            focused: false,
+            children: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ocr_match_returns_none_for_empty_input() {
+        assert!(ocr_match(&[], "save", 0).is_none());
+    }
+
+    #[test]
+    fn find_in_tree_matches_role_and_text() {
+        let tree = vec![
+            node("window", Some("Doc"), (0, 0, 800, 600)),
+            node("button", Some("Cancel"), (10, 10, 60, 20)),
+            node("button", Some("Save"), (80, 10, 60, 20)),
+        ];
+        let b = find_in_tree(&tree, Some("Save"), Some("button"), 0).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (80, 10, 60, 20));
+    }
+
+    #[test]
+    fn find_in_tree_respects_index_for_duplicates() {
+        let tree = vec![
+            node("button", Some("Save"), (0, 0, 10, 10)),
+            node("button", Some("Save"), (100, 100, 10, 10)),
+        ];
+        let first = find_in_tree(&tree, Some("Save"), Some("button"), 0).unwrap();
+        let second = find_in_tree(&tree, Some("Save"), Some("button"), 1).unwrap();
+        assert_eq!((first.x, first.y), (0, 0));
+        assert_eq!((second.x, second.y), (100, 100));
+    }
+
+    #[test]
+    fn find_in_tree_walks_children_depth_first() {
+        let mut window = node("window", Some("Doc"), (0, 0, 800, 600));
+        window.children.push(node("button", Some("Save"), (5, 5, 50, 20)));
+        let tree = vec![window];
+        let b = find_in_tree(&tree, Some("Save"), Some("button"), 0).unwrap();
+        assert_eq!(b.x, 5);
+    }
+
+    #[test]
+    fn find_in_tree_misses_return_none() {
+        let tree = vec![node("button", Some("Cancel"), (0, 0, 10, 10))];
+        assert!(find_in_tree(&tree, Some("Save"), Some("button"), 0).is_none());
+        // Role mismatch.
+        assert!(find_in_tree(&tree, Some("Cancel"), Some("edit"), 0).is_none());
+    }
+
+    #[test]
+    fn center_of_bounds_is_midpoint() {
+        let (cx, cy) = center(&Bounds {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        });
+        assert_eq!((cx, cy), (60, 45));
+    }
+}
+

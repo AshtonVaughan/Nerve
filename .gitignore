@@ -35,3 +35,5 @@ benchmarks/results/*.json
 
 # Daemon scratch
 /tmp/nerve-*.log
+.nerve.pid
+**/.nerve.pid
