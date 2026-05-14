@@ -37,7 +37,7 @@ impl Platform {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bounds {
     pub x: i32,
     pub y: i32,

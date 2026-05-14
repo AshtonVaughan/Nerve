@@ -18,6 +18,7 @@ default = []
 # root, where the workspace default member is nerve-cli) wires Tesseract
 # into the binary's capability advertisement.
 ocr-tesseract = ["nerve-core/ocr-tesseract"]
+browser-cdp = ["nerve-core/browser-cdp"]
 macos-accessibility = ["nerve-core/macos-accessibility"]
 linux-atspi = ["nerve-core/linux-atspi"]
 

@@ -229,12 +229,38 @@ impl Compiler {
         }
 
         // 2. Native UI action — placeholder. Future: app-specific hooks
-        //    (TextEdit menu items, browser DOM via WebDriver, etc).
+        //    (TextEdit menu items, IME compose state, etc).
         attempted.push(ExecutionMethod::NativeUiAction);
         debug!(?app, "native UI action layer is a no-op in MVP");
 
-        // 3. Browser DOM adapter — placeholder.
+        // 3. Browser DOM adapter. When the active app is a Chromium-family
+        //    browser and the build has `--features browser-cdp`, ask
+        //    DevTools for the element by visible text.
         attempted.push(ExecutionMethod::BrowserDomAdapter);
+        if let (Some(app_name), Some(needle)) = (app, text) {
+            if crate::browser::enabled() {
+                if let Some(elem) = crate::browser::query_element(app_name, needle).await {
+                    let (cx, cy) = center(&elem.bounds);
+                    trace.push(format!(
+                        "cdp match app={:?} text={:?} bounds={:?} (page={})",
+                        app_name, needle, elem.bounds, elem.frame_url
+                    ));
+                    return Ok(CompiledPlan {
+                        method: ExecutionMethod::BrowserDomAdapter,
+                        primitive: Some(LowLevelAction::Click {
+                            x: cx,
+                            y: cy,
+                            button: MouseButton::Left,
+                        }),
+                        attempted: attempted.clone(),
+                        trace: trace.clone(),
+                    });
+                }
+                trace.push("cdp scan missed".into());
+            } else {
+                trace.push("cdp unavailable: build without browser-cdp feature".into());
+            }
+        }
 
         // 4. Caller-supplied bounds hint takes precedence over OCR.
         if let Some(b) = bounds_hint {
