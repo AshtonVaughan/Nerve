@@ -386,10 +386,79 @@ pub(crate) fn ocr_match(png: &[u8], needle: &str, index: usize) -> Option<Bounds
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nerve_protocol::UiNode;
+
+    fn node(role: &str, label: Option<&str>, b: (i32, i32, i32, i32)) -> UiNode {
+        UiNode {
+            role: role.into(),
+            label: label.map(|s| s.into()),
+            value: None,
+            bounds: Some(Bounds {
+                x: b.0,
+                y: b.1,
+                width: b.2,
+                height: b.3,
+            }),
+            enabled: true,
+            focused: false,
+            children: Vec::new(),
+        }
+    }
 
     #[test]
     fn ocr_match_returns_none_for_empty_input() {
         assert!(ocr_match(&[], "save", 0).is_none());
+    }
+
+    #[test]
+    fn find_in_tree_matches_role_and_text() {
+        let tree = vec![
+            node("window", Some("Doc"), (0, 0, 800, 600)),
+            node("button", Some("Cancel"), (10, 10, 60, 20)),
+            node("button", Some("Save"), (80, 10, 60, 20)),
+        ];
+        let b = find_in_tree(&tree, Some("Save"), Some("button"), 0).unwrap();
+        assert_eq!((b.x, b.y, b.width, b.height), (80, 10, 60, 20));
+    }
+
+    #[test]
+    fn find_in_tree_respects_index_for_duplicates() {
+        let tree = vec![
+            node("button", Some("Save"), (0, 0, 10, 10)),
+            node("button", Some("Save"), (100, 100, 10, 10)),
+        ];
+        let first = find_in_tree(&tree, Some("Save"), Some("button"), 0).unwrap();
+        let second = find_in_tree(&tree, Some("Save"), Some("button"), 1).unwrap();
+        assert_eq!((first.x, first.y), (0, 0));
+        assert_eq!((second.x, second.y), (100, 100));
+    }
+
+    #[test]
+    fn find_in_tree_walks_children_depth_first() {
+        let mut window = node("window", Some("Doc"), (0, 0, 800, 600));
+        window.children.push(node("button", Some("Save"), (5, 5, 50, 20)));
+        let tree = vec![window];
+        let b = find_in_tree(&tree, Some("Save"), Some("button"), 0).unwrap();
+        assert_eq!(b.x, 5);
+    }
+
+    #[test]
+    fn find_in_tree_misses_return_none() {
+        let tree = vec![node("button", Some("Cancel"), (0, 0, 10, 10))];
+        assert!(find_in_tree(&tree, Some("Save"), Some("button"), 0).is_none());
+        // Role mismatch.
+        assert!(find_in_tree(&tree, Some("Cancel"), Some("edit"), 0).is_none());
+    }
+
+    #[test]
+    fn center_of_bounds_is_midpoint() {
+        let (cx, cy) = center(&Bounds {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 50,
+        });
+        assert_eq!((cx, cy), (60, 45));
     }
 }
 
