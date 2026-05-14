@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import websockets
+
+
+def _env_token() -> Optional[str]:
+    t = os.environ.get("NERVE_AUTH_TOKEN")
+    return t if t else None
 
 from .types import (
     ActionEnvelope,
@@ -35,12 +41,28 @@ class AsyncNerveClient:
         async with AsyncNerveClient() as client:
             obs = await client.get_observation()
             await client.click_element(text="Save", role="button")
+
+    The client automatically reconnects (with exponential backoff) when the
+    underlying WebSocket drops. Disable by passing ``auto_reconnect=False``.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765, client_name: str = "nerve-python"):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        client_name: str = "nerve-python",
+        auth_token: Optional[str] = None,
+        auto_reconnect: bool = True,
+        reconnect_initial_s: float = 0.5,
+        reconnect_max_s: float = 30.0,
+    ):
         self.host = host
         self.port = port
         self.client_name = client_name
+        self.auth_token = auth_token or _env_token()
+        self._auto_reconnect = auto_reconnect
+        self._reconnect_initial_s = reconnect_initial_s
+        self._reconnect_max_s = reconnect_max_s
         self._ws: Optional[websockets.WebSocketClientProtocol] = None  # type: ignore[name-defined]
         self._session_id: Optional[str] = None
         self._inbox: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue()
@@ -48,10 +70,27 @@ class AsyncNerveClient:
         self._pending: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
         self._unsolicited: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
         self._closed = False
+        self._last_policy: Optional[SafetyPolicy] = None
 
     # -- lifecycle --------------------------------------------------------
 
     async def connect(self, policy: Optional[SafetyPolicy] = None) -> str:
+        self._last_policy = policy
+        attempt = 0
+        delay = self._reconnect_initial_s
+        while True:
+            try:
+                return await self._connect_once(policy=policy)
+            except Exception as e:
+                if not self._auto_reconnect or self._closed:
+                    raise
+                attempt += 1
+                if attempt > 8:  # bounded for connect path
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, self._reconnect_max_s)
+
+    async def _connect_once(self, policy: Optional[SafetyPolicy] = None) -> str:
         self._ws = await websockets.connect(f"ws://{self.host}:{self.port}/")
         self._reader_task = asyncio.create_task(self._reader())
         # Drain the daemon's `hello`.
@@ -61,7 +100,9 @@ class AsyncNerveClient:
                 "kind": "session_start",
                 "client_name": self.client_name,
                 "client_version": "0.1.0",
-                "session_id": None,
+                "client_protocol_version": {"major": 0, "minor": 1, "patch": 0},
+                "auth_token": self.auth_token,
+                "session_id": self._session_id,
                 "policy": policy.to_dict() if policy else None,
             }
         )
@@ -151,11 +192,19 @@ class AsyncNerveClient:
             except ValueError:
                 pass
 
-    async def execute(self, action: Dict[str, Any], note: Optional[str] = None) -> ActionResult:
-        envelope = ActionEnvelope(id=f"act_{uuid.uuid4().hex}", action=action, note=note)
-        resp = await self._request(
-            {"kind": "execute_action", "action": envelope.to_dict()}
+    async def execute(
+        self,
+        action: Dict[str, Any],
+        note: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> ActionResult:
+        envelope = ActionEnvelope(
+            id=f"act_{uuid.uuid4().hex}", action=action, note=note
         )
+        env_dict = envelope.to_dict()
+        if idempotency_key is not None:
+            env_dict["idempotency_key"] = idempotency_key
+        resp = await self._request({"kind": "execute_action", "action": env_dict})
         self._check(resp)
         return ActionResult.from_dict(resp["result"])
 

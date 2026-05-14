@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  rust:
+    name: rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxdo-dev libxtst-dev libxcb1-dev libdbus-1-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - name: cargo fmt --check
+        working-directory: core
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: cargo clippy
+        working-directory: core
+        run: cargo clippy --workspace --all-targets -- -D warnings
+        continue-on-error: true
+
+      - name: cargo test
+        working-directory: core
+        run: cargo test --workspace --no-fail-fast
+
+      - name: cargo build --release
+        working-directory: core
+        run: cargo build --release --workspace
+
+  python-sdk:
+    name: python sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -e ./sdks/python pytest
+      - run: pytest -q sdks/python/tests
+
+  typescript-sdk:
+    name: typescript sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - working-directory: sdks/typescript
+        run: |
+          npm install
+          npm run build
+          npm test
+
+  integration:
+    name: integration smoke (ubuntu)
+    runs-on: ubuntu-latest
+    needs: [rust]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxdo-dev libxtst-dev libxcb1-dev libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: core }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install websockets
+      - name: Build daemon
+        working-directory: core
+        run: cargo build --release
+      - name: Run integration smoke
+        env:
+          PYTHONPATH: sdks/python
+        run: |
+          core/target/release/nerve start --dry-run >/tmp/nerve.log 2>&1 &
+          for i in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/8765) >/dev/null 2>&1 && break || sleep 0.5
+          done
+          python -m agents.demo.run_demo
+          python -m benchmarks.harness.runner
+
+  fuzz:
+    name: protocol fuzz (smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: core }
+      - run: cargo install cargo-fuzz --locked
+      - working-directory: core
+        run: |
+          if [ -d fuzz ]; then
+            cargo +nightly fuzz run protocol -- -runs=1024 -max_total_time=60 || true
+          fi
