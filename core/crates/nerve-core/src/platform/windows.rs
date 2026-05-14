@@ -42,17 +42,14 @@ impl PlatformBackend for WindowsBackend {
         let mut caps = self.inner.capabilities();
         caps.platform = Platform::Windows;
         caps.backends = self.backends();
-        // UIA tree extraction lands in Tier 2.4. For now we honestly
-        // report no AX tree, but the input + active_window paths are
-        // already native via SendInput / GetForegroundWindow.
-        caps.accessibility_tree = false;
+        caps.accessibility_tree = true;
         caps
     }
     fn backends(&self) -> Backends {
         Backends {
-            screen_capture: "xcap (Windows.Graphics.Capture pending)".to_string(),
+            screen_capture: "xcap (DXGI Duplication pending)".to_string(),
             input: "SendInput (Unicode) + enigo (hotkeys)".to_string(),
-            accessibility: "none (UIAutomation pending)".to_string(),
+            accessibility: "UIAutomation".to_string(),
             clipboard: "arboard".to_string(),
         }
     }
@@ -78,9 +75,13 @@ impl PlatformBackend for WindowsBackend {
     }
 
     async fn ui_tree(&self) -> Result<Vec<UiNode>> {
-        // Tier 2.4 fills this in. Until then, return empty so the
-        // compiler walks the OCR / coord ladder honestly.
-        Ok(Vec::new())
+        // UIA tree walking is COM-heavy; do it on a blocking thread so a
+        // misbehaving target app can't block the daemon's tokio worker.
+        // The walker has its own depth / count cap.
+        let nodes = tokio::task::spawn_blocking(super::windows_native::ui_tree)
+            .await
+            .map_err(|e| NerveError::Backend(format!("ui_tree join: {e}")))?;
+        Ok(nodes)
     }
 
     async fn move_mouse(&self, x: i32, y: i32) -> Result<()> {
