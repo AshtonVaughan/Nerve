@@ -5,6 +5,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+* OCR pipeline is wired end-to-end. `Capabilities.ocr` now reports the
+  compile-time feature flag (was hard-coded `false`); the action compiler's
+  OCR rung scans the screenshot for `click_element_by_text` targets when AX
+  / UIA misses; `GetObservation { include_ocr: true }` populates
+  `Observation.ocr`. New CLI: `nerve observe --with-ocr`.
+* `nerve-cli` forwards the `ocr-tesseract` (and other backend) features to
+  `nerve-core` so a top-level `cargo build --release --features
+  ocr-tesseract` actually compiles tesseract into the binary.
+* CI matrix installs `libtesseract-dev` / `tesseract-ocr-eng` on Linux,
+  `brew install tesseract leptonica` on macOS, and runs `cargo test
+  --features ocr-tesseract` as a dedicated job under
+  `RUSTFLAGS="-D warnings"`.
+
 ### Added
 
 * Stable `ErrorCode` enum + retryable / retry_after_ms metadata on every

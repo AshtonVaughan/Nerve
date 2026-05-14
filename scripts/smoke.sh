@@ -14,9 +14,10 @@ cd "$ROOT"
 BIN="core/target/release/nerve"
 LOG="/tmp/nerve-smoke.log"
 PORT="${NERVE_PORT:-8765}"
+FEATURES="${NERVE_FEATURES:-ocr-tesseract}"
 
-if [ ! -x "$BIN" ]; then
-  (cd core && cargo build --release)
+if [ "${NERVE_REBUILD:-0}" = "1" ] || [ ! -x "$BIN" ]; then
+  (cd core && cargo build --release --features "$FEATURES")
 fi
 
 # Boot daemon
@@ -36,7 +37,24 @@ echo "==> nerve status"
 "$BIN" status
 
 echo "==> nerve capabilities (truncated)"
-"$BIN" capabilities | head -10
+"$BIN" capabilities | head -16
+echo "==> assert: ocr capability matches build features"
+OCR_FLAG=$("$BIN" capabilities | python3 -c "import json,sys; print(json.load(sys.stdin)['ocr'])")
+case ",$FEATURES," in
+  *,ocr-tesseract,*)
+    if [ "$OCR_FLAG" != "True" ]; then
+      echo "FAIL: built with ocr-tesseract but capabilities.ocr=$OCR_FLAG"
+      exit 1
+    fi
+    ;;
+  *)
+    if [ "$OCR_FLAG" != "False" ]; then
+      echo "FAIL: built without ocr-tesseract but capabilities.ocr=$OCR_FLAG"
+      exit 1
+    fi
+    ;;
+esac
+echo "ocr capability ($OCR_FLAG) matches features ($FEATURES)"
 
 echo "==> python demo"
 PYTHONPATH=sdks/python python3 -m agents.demo.run_demo | tail -20

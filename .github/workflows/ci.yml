@@ -27,7 +27,18 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxdo-dev libxtst-dev libxcb1-dev libdbus-1-dev pkg-config
+          sudo apt-get install -y libxdo-dev libxtst-dev libxcb1-dev libdbus-1-dev pkg-config \
+                                  libtesseract-dev libleptonica-dev tesseract-ocr-eng clang libclang-dev
+
+      - name: Install macOS build deps
+        if: matrix.os == 'macos-latest'
+        run: brew install tesseract leptonica
+
+      - name: Install Windows build deps
+        if: matrix.os == 'windows-latest'
+        # Tesseract on Windows is harder to wire (needs vcpkg or a pre-built DLL),
+        # so we leave the ocr-tesseract feature off on this runner.
+        run: echo "no extra deps"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -40,19 +51,30 @@ jobs:
       - name: cargo fmt --check
         working-directory: core
         run: cargo fmt --all -- --check
-        continue-on-error: true
 
       - name: cargo clippy
         working-directory: core
         run: cargo clippy --workspace --all-targets -- -D warnings
-        continue-on-error: true
+        env:
+          RUSTFLAGS: "-D warnings"
 
       - name: cargo test
         working-directory: core
+        env:
+          RUSTFLAGS: "-D warnings"
         run: cargo test --workspace --no-fail-fast
+
+      - name: cargo test (ocr-tesseract feature)
+        if: matrix.os != 'windows-latest'
+        working-directory: core
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo test -p nerve-core --features ocr-tesseract --lib ocr -- --nocapture
 
       - name: cargo build --release
         working-directory: core
+        env:
+          RUSTFLAGS: "-D warnings"
         run: cargo build --release --workspace
 
   python-sdk:

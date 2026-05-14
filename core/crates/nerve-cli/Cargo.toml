@@ -11,6 +11,17 @@ description = "Nerve daemon binary and command-line client."
 name = "nerve"
 path = "src/main.rs"
 
+[features]
+default = []
+# Forward to nerve-core so `cargo build -p nerve-cli --features ocr-tesseract`
+# (and `cargo build --release --features ocr-tesseract` from the workspace
+# root, where the workspace default member is nerve-cli) wires Tesseract
+# into the binary's capability advertisement.
+ocr-tesseract = ["nerve-core/ocr-tesseract"]
+macos-accessibility = ["nerve-core/macos-accessibility"]
+windows-uia = ["nerve-core/windows-uia"]
+linux-atspi = ["nerve-core/linux-atspi"]
+
 [dependencies]
 nerve-core = { path = "../nerve-core" }
 nerve-protocol = { path = "../nerve-protocol" }

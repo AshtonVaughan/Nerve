@@ -36,6 +36,11 @@ pub enum ClientMessage {
         request_id: String,
         include_screenshot: Option<bool>,
         include_ui_tree: Option<bool>,
+        /// Run OCR over the captured screenshot before responding. Honoured
+        /// only when the daemon was built with `--features ocr-tesseract`
+        /// (advertised via `Capabilities.ocr`). Default: false.
+        #[serde(default)]
+        include_ocr: Option<bool>,
     },
     SubscribeObservations {
         request_id: String,

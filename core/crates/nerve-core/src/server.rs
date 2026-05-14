@@ -391,6 +391,7 @@ impl WsServer {
                 request_id,
                 include_screenshot,
                 include_ui_tree,
+                include_ocr,
             } => {
                 let session = match ensure_session(active_session, out_tx, Some(request_id.clone())).await {
                     Some(s) => s,
@@ -399,6 +400,7 @@ impl WsServer {
                 let opts = ObserveOpts {
                     include_screenshot: include_screenshot.unwrap_or(true),
                     include_ui_tree: include_ui_tree.unwrap_or(true),
+                    include_ocr: include_ocr.unwrap_or(false),
                 };
                 let obs = observe(&runtime.backend, &session.safety, &session.meta.id, opts).await;
                 let _ = out_tx
@@ -456,6 +458,7 @@ impl WsServer {
                     let opts = ObserveOpts {
                         include_screenshot: include_screenshot.unwrap_or(false),
                         include_ui_tree: false,
+                        include_ocr: false,
                     };
                     let frame_cache = if delta_frames {
                         Some(crate::diff::FrameCache::new())

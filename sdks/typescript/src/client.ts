@@ -170,11 +170,13 @@ export class NerveClient {
   async getObservation(options?: {
     includeScreenshot?: boolean;
     includeUiTree?: boolean;
+    includeOcr?: boolean;
   }): Promise<Observation> {
     const resp = await this.request<ServerMessage & { kind: "observation" }>({
       kind: "get_observation",
       include_screenshot: options?.includeScreenshot ?? true,
       include_ui_tree: options?.includeUiTree ?? false,
+      include_ocr: options?.includeOcr ?? false,
     } as ClientMessage);
     return resp.observation;
   }

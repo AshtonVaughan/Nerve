@@ -81,6 +81,7 @@ impl Runtime {
     }
 
     pub async fn start(self) -> anyhow::Result<()> {
+        tracing::debug!(ocr_enabled = crate::ocr::enabled(), "build features");
         if self.config.telemetry.prometheus {
             if let Err(e) = crate::metrics::install_prometheus(self.config.prometheus_bind) {
                 tracing::warn!("could not install prometheus exporter: {e}");

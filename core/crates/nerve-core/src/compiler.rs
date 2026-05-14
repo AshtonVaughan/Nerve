@@ -236,7 +236,7 @@ impl Compiler {
         // 3. Browser DOM adapter — placeholder.
         attempted.push(ExecutionMethod::BrowserDomAdapter);
 
-        // 4. OCR / bounds hint.
+        // 4. Caller-supplied bounds hint takes precedence over OCR.
         if let Some(b) = bounds_hint {
             attempted.push(ExecutionMethod::OcrBoundingBox);
             let (cx, cy) = center(&b);
@@ -253,7 +253,53 @@ impl Compiler {
             });
         }
 
-        // 5. Coordinate fallback. Without bounds we cannot click sensibly.
+        // 5. OCR rung: capture the screen and scan for `text`. Only worth
+        //    trying when the caller actually told us what text to find.
+        if let Some(needle) = text {
+            attempted.push(ExecutionMethod::OcrBoundingBox);
+            if crate::ocr::enabled() {
+                match self.backend.capture_primary_screen().await {
+                    Ok(captured) => {
+                        let png = captured.png_bytes.clone();
+                        let needle_owned = needle.to_string();
+                        let target_index = index;
+                        let join = tokio::task::spawn_blocking(move || {
+                            ocr_match(&png, &needle_owned, target_index)
+                        });
+                        match tokio::time::timeout(std::time::Duration::from_secs(5), join).await
+                        {
+                            Ok(Ok(Some(bounds))) => {
+                                let (cx, cy) = center(&bounds);
+                                trace.push(format!(
+                                    "ocr match text={:?} bounds={:?} (index={})",
+                                    needle, bounds, target_index
+                                ));
+                                return Ok(CompiledPlan {
+                                    method: ExecutionMethod::OcrBoundingBox,
+                                    primitive: Some(LowLevelAction::Click {
+                                        x: cx,
+                                        y: cy,
+                                        button: MouseButton::Left,
+                                    }),
+                                    attempted: attempted.clone(),
+                                    trace: trace.clone(),
+                                });
+                            }
+                            Ok(Ok(None)) => trace.push(format!("ocr scan missed '{needle}'")),
+                            Ok(Err(e)) => trace.push(format!("ocr task join error: {e}")),
+                            Err(_) => trace.push("ocr scan timed out".into()),
+                        }
+                    }
+                    Err(e) => trace.push(format!("ocr screen capture failed: {e}")),
+                }
+            } else {
+                trace.push(
+                    "ocr unavailable: build without ocr-tesseract feature, skipping rung".into(),
+                );
+            }
+        }
+
+        // 6. Coordinate fallback would be unsafe — refuse to guess.
         attempted.push(ExecutionMethod::CoordinateClick);
         Err(NerveError::ElementNotFound)
     }
@@ -322,3 +368,28 @@ fn find_in_tree<'a>(
 fn center(b: &Bounds) -> (i32, i32) {
     (b.x + b.width / 2, b.y + b.height / 2)
 }
+
+/// Run OCR over the screenshot and return the bounds of the `n`th fragment
+/// whose text matches `needle` (case-insensitive, whole-word or substring).
+///
+/// `index = 0` picks the first match. Returns None when nothing matched.
+pub(crate) fn ocr_match(png: &[u8], needle: &str, index: usize) -> Option<Bounds> {
+    let fragments = crate::ocr::extract(png);
+    let lc = needle.to_lowercase();
+    let mut hits = fragments.into_iter().filter(|f| {
+        let t = f.text.to_lowercase();
+        t == lc || t.contains(&lc)
+    });
+    hits.nth(index).map(|f| f.bounds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ocr_match_returns_none_for_empty_input() {
+        assert!(ocr_match(&[], "save", 0).is_none());
+    }
+}
+
