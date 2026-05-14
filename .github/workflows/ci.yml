@@ -71,6 +71,12 @@ jobs:
           RUSTFLAGS: "-D warnings"
         run: cargo test -p nerve-core --features ocr-tesseract --lib ocr -- --nocapture
 
+      - name: cargo build (browser-cdp feature)
+        working-directory: core
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo build --features browser-cdp --workspace
+
       - name: cargo build --release
         working-directory: core
         env:

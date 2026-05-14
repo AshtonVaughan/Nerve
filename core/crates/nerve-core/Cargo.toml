@@ -15,6 +15,12 @@ clipboard = []
 # Optional Tesseract-backed OCR. Requires libtesseract/libleptonica on the
 # host. We feature-gate it because most CI runners don't have those installed.
 ocr-tesseract = ["dep:leptess"]
+# Browser DOM bridge over the Chrome DevTools Protocol. Adds a thin
+# WebSocket client that lets the action compiler resolve click_element
+# requests against the real DOM of a Chromium-family browser running
+# with --remote-debugging-port. No extra runtime dependency (only the
+# `reqwest` HTTP client to discover the WS endpoint).
+browser-cdp = ["dep:reqwest"]
 # Platform-specific deep integrations. macos-accessibility and linux-atspi
 # remain feature-gated because they pull in extra system libraries that
 # CI / contributors won't always have; windows-uia has no extra system
@@ -62,6 +68,9 @@ flate2 = { workspace = true }
 rustls = { workspace = true }
 rcgen = { workspace = true }
 leptess = { version = "0.14", optional = true }
+# CDP runs against the browser on `127.0.0.1`, so we deliberately drop the
+# TLS feature — keeps the dependency surface minimal.
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.5", optional = true }

@@ -34,6 +34,19 @@ On macOS:
 brew install tesseract leptonica   # only if you want OCR
 ```
 
+For the browser DOM bridge (lets `click_element { text }` resolve against
+the live DOM of a Chromium-family browser running with
+`--remote-debugging-port`), build with `--features browser-cdp`:
+
+```bash
+cargo build --release --features "ocr-tesseract browser-cdp"
+
+# Then launch Chrome / Edge / Brave with debugging:
+google-chrome --remote-debugging-port=9222 &
+# Override the port if you used something other than 9222:
+export NERVE_CDP_PORT=9333
+```
+
 To verify OCR landed, run:
 
 ```bash
