@@ -89,12 +89,11 @@ def find_nerve_binary() -> Optional[str]:
     candidate = shutil.which("nerve")
     if candidate:
         return candidate
-    debug = REPO_ROOT / "core" / "target" / "debug" / "nerve"
-    if debug.exists():
-        return str(debug)
-    release = REPO_ROOT / "core" / "target" / "release" / "nerve"
-    if release.exists():
-        return str(release)
+    exe = ".exe" if sys.platform == "win32" else ""
+    for build in ("release", "debug"):
+        path = REPO_ROOT / "core" / "target" / build / f"nerve{exe}"
+        if path.exists():
+            return str(path)
     return None
 
 
@@ -155,6 +154,12 @@ def main() -> int:
         default="mock",
         help="model adapter to drive the demo (default: mock)",
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=25,
+        help="safety cap on the number of plan() calls per task (default: 25)",
+    )
     args = parser.parse_args()
 
     # Validate credentials before we boot the daemon so failure is fast and
@@ -176,10 +181,16 @@ def main() -> int:
             f"wayland_limited={caps.wayland_limited}"
         )
 
+        max_steps = args.max_steps
         for task in DEMO_TASKS:
             print(f"[demo] task: {task}")
             state = AdapterState(task=task)
-            while not state.done:
+            # Local step counter so we don't fight adapters that track
+            # `state.step` themselves (e.g. MockAgent gates its first batch
+            # on `state.step == 0` and increments internally).
+            steps = 0
+            while not state.done and steps < max_steps:
+                steps += 1
                 # Real adapters need the screenshot to ground their next
                 # decision; MockAgent doesn't, but the cost is small enough
                 # that we always include it when not mock.
@@ -188,7 +199,18 @@ def main() -> int:
                 )
                 actions = agent.plan(obs.raw, state)
                 if not actions:
+                    # Either the model finished (state.done set in plan)
+                    # or it returned only text. Either way: this task is done.
                     break
+                # Show what the model actually asked for so dry-run output
+                # isn't a wall of indistinguishable "no_op ok" lines.
+                for a in actions:
+                    kind = a.get("type", "?")
+                    summary = {
+                        k: v for k, v in a.items()
+                        if k in ("x", "y", "text", "keys", "delta_x", "delta_y")
+                    }
+                    print(f"        ~ {kind} {summary}")
                 results = client.execute_batch(actions, stop_on_error=False)
                 for r in results:
                     state.history.append({"id": r.id, "method": r.method, "ok": r.ok})
@@ -198,6 +220,8 @@ def main() -> int:
                 # one step per task.
                 if args.adapter == "mock":
                     state.done = True
+            if steps >= max_steps and not state.done:
+                print(f"        ! reached max_steps={max_steps}, moving on")
 
         log = client.get_action_log(limit=50)
         print(f"[demo] audit log entries: {len(log)}")
@@ -210,7 +234,10 @@ def main() -> int:
             pass
         if daemon_proc is not None:
             print("[demo] stopping daemon")
-            daemon_proc.send_signal(signal.SIGINT)
+            # SIGINT is not deliverable to a Windows console child from a
+            # different console, so we use terminate() + a short wait. On
+            # POSIX this still sends SIGTERM which the daemon handles.
+            daemon_proc.terminate()
             try:
                 daemon_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:

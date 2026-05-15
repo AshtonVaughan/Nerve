@@ -693,9 +693,28 @@ impl WsServer {
                 runtime.engage_emergency_stop();
                 let _ = out_tx
                     .send(ServerMessage::EmergencyStopped {
-                        request_id: Some(request_id),
+                        request_id: Some(request_id.clone()),
                     })
                     .await;
+                // The CLI uses request_id "cli-stop" to signal "we want the
+                // daemon out of the process tree." Schedule a clean exit
+                // after the response has flushed so `nerve stop` does not
+                // have to fall back to TerminateProcess on Windows (where
+                // taskkill without /F cannot signal a console app cleanly).
+                if request_id == "cli-stop" {
+                    tracing::info!("cli-stop received; exiting daemon");
+                    // Use std::thread::spawn rather than tokio::spawn: the
+                    // current connection task is about to be dropped when
+                    // the client disconnects, and tokio task cancellation
+                    // would kill an async exit timer with it. An OS thread
+                    // outlives the runtime so the exit is guaranteed.
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            250,
+                        ));
+                        std::process::exit(0);
+                    });
+                }
             }
             ClientMessage::ConfirmAction {
                 request_id,

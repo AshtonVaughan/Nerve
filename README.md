@@ -1,113 +1,175 @@
 # Nerve
 
-> **Nerve is the real-time control layer that gives AI agents a body.**
+A hackable Rust daemon for driving a desktop computer over a WebSocket
+protocol. Mouse, keyboard, clipboard, screenshot, accessibility tree -
+exposed as a single local service that any process (Python, TypeScript,
+CLI, browser dashboard, AI agent) can attach to.
 
-Nerve is a cross-platform, real-time computer-use execution runtime for AI
-agents. It is the missing native layer underneath OpenAI CUA, Anthropic
-Computer Use, and every "let the model use the computer" workflow you have
-seen demoed in the last 18 months.
+It is not trying to be Claude Code, Anthropic Cowork, UI-TARS Desktop, or
+Apple Intelligence. It is the layer underneath those things: a working
+reference implementation of a cross-platform computer-use runtime, with
+audit logs, safety policies, multi-client fan-out, and an emergency-stop
+button - so you don't have to write that part yourself.
 
-* **Native daemon.** A single Rust process running locally — `SendInput`,
-  `CGEvent`, XTest, no remote IPC.
-* **Persistent control plane.** WebSocket protocol with structured
-  observations, semantic actions, audit, replay, safety policies, and
-  emergency stop.
-* **Hybrid perception.** Screenshots when needed, accessibility tree where
-  available, OCR as a fallback — exposed through one observation object.
-* **Action compiler.** Semantic actions (`click "Save" button in TextEdit`)
-  are lowered through an explicit ladder: AX → native UI → browser DOM →
-  OCR → coordinate fallback. Every decision is logged for replay.
-* **Model-agnostic.** The model is the brain, Nerve is the body. The
-  reference Python and TypeScript SDKs include adapter slots for
-  OpenAI / Anthropic / Gemini / Ollama / vLLM; the mock agent ships built-in.
+## What you can use it for today
 
-## What's here
+- **Drive a desktop app from Python or TypeScript test code** with one
+  install instead of stitching together `pyautogui` + screenshot libs +
+  per-OS hacks.
+- **Add computer-use to your own AI agent or tool** without re-implementing
+  `SendInput`, UIA trees, screen capture, and a dry-run / audit / safety
+  layer for every platform.
+- **Read the source as a reference** if you're building anything in this
+  space - the daemon split, action ladder, prompt-cached LLM adapter,
+  cassette benchmarks, and per-platform scaffolding are all worked
+  examples.
 
-```
-core/                       # Rust workspace — daemon, CLI, protocol
-  crates/nerve-protocol/    # Shared JSON / WebSocket types
-  crates/nerve-core/        # Daemon library
-  crates/nerve-cli/         # `nerve` binary
-sdks/python/                # Python SDK (sync + asyncio)
-sdks/typescript/            # TypeScript / JavaScript SDK
-agents/                     # Model adapters + the mock + the demo
-dashboard/                  # Local web dashboard (served by the daemon)
-benchmarks/                 # Harness + canonical local tasks
-docs/                       # Architecture, protocol, safety, etc.
-```
+## Status
+
+| Layer | State |
+|---|---|
+| Rust daemon, WebSocket protocol, CLI, dashboard | Working |
+| Audit log, safety policies, dry-run, emergency stop, rate limits | Working |
+| Python SDK (sync + asyncio), TypeScript SDK | Working |
+| Windows native: UIA tree walk, `SendInput` Unicode input | Working |
+| Anthropic Computer Use adapter (`computer_20250124`, full `tool_result` loop) | Working end-to-end |
+| OpenAI CUA adapter | Code shipped, not tested live |
+| macOS native (ScreenCaptureKit + AX + CGEvent + permissions) | Compiles, not tested by author |
+| Linux native (X11 + Wayland + AT-SPI + uinput) | Compiles, not tested by author |
+| Tesseract OCR (`--features ocr-tesseract`) | Compiles, needs libtesseract on host |
+| Chrome DevTools Protocol bridge (`--features browser-cdp`) | Compiles, not tested live |
+| 26-test suite (unit + compiler ladder + integration) | Passing |
+| Cassette-replayed benchmarks (8 tasks) | Passing |
+
+The Windows path is the verified golden path. Cross-platform code exists
+for macOS and Linux but the author only ships and tests on Windows. PRs
+welcome from anyone who wants to validate or harden the other platforms.
 
 ## Quickstart
 
 ```bash
-# 1. Build the daemon.
+# 1. Build the daemon (requires stable Rust)
 cd core && cargo build --release
 
-# 2. Start it. macOS / Linux:
-./target/release/nerve start
-# Windows:
-.\target\release\nerve.exe start
+# 2. Start it
+./target/release/nerve start              # macOS/Linux
+.\target\release\nerve.exe start          # Windows
 
-# 3. Open the dashboard.
-open http://127.0.0.1:8765/
+# 3. Open the dashboard
+http://127.0.0.1:8765/
 
-# 4. Drive it from Python.
+# 4. Drive it from Python
 pip install -e ./sdks/python
 python -c "from nerve import NerveClient; c = NerveClient(); c.connect(); print(c.get_capabilities().platform); c.stop()"
 
-# 5. Drive it from TypeScript.
-cd sdks/typescript && npm install && npm run build
-node -e "import('./dist/index.js').then(async ({NerveClient}) => { const c = new NerveClient(); await c.connect(); console.log((await c.getObservation()).platform); await c.stop(); })"
+# 5. Stop the daemon cleanly
+./target/release/nerve stop
 ```
 
-Full setup notes per OS are in [`docs/quickstart.md`](./docs/quickstart.md).
+Full per-OS setup notes: [`docs/quickstart.md`](./docs/quickstart.md).
+
+## Architecture in one diagram
+
+```
+   Python SDK ─┐
+TypeScript SDK ─┤
+  nerve CLI    ─┼──► WebSocket :8765 ──► nerve daemon (Rust)
+  Dashboard    ─┤        (audit + safety + dry-run)
+  AI adapter   ─┘                  │
+                                   ├── platform backend
+                                   │   (UIA / SendInput on Win,
+                                   │    AX / CGEvent on Mac,
+                                   │    AT-SPI / uinput on Linux,
+                                   │    xcap / enigo / arboard fallback)
+                                   │
+                                   └── action compiler
+                                       (semantic → AX → bounds → OCR
+                                        → ElementNotFound)
+```
 
 ## Why a daemon, not a library
 
-| Problem | What an in-process library does | What Nerve does |
-| ------- | ------------------------------- | --------------- |
-| Permissions | Each agent process needs its own Screen Recording grant. | Granted once to the daemon. |
-| Multi-client | Only the calling process can see what is going on. | Dashboard + SDK + CLI can attach concurrently. |
+| Problem | In-process library | Nerve |
+| ------- | ------------------ | ----- |
+| OS permissions | Each agent re-grants Screen Recording + Accessibility. | Granted once to the daemon. |
+| Multi-client | Only the calling process sees what's happening. | Dashboard + SDK + CLI + agent all attach concurrently. |
 | Observation cost | Each step re-grabs OS handles. | Persistent capture + streamed observations. |
 | Auditability | DIY logging per agent. | One canonical JSONL log; same replay everywhere. |
 | Safety | Per-agent guardrails. | One enforcement point: dry-run, allowlist, emergency stop. |
 
-See [`docs/competitive-positioning.md`](./docs/competitive-positioning.md)
-for the head-to-head against raw CUA / Computer Use loops.
+## What ships in the repo
 
-## Status
+```
+core/                       # Rust workspace - daemon, CLI, protocol
+  crates/nerve-protocol/    # Wire JSON / WebSocket types
+  crates/nerve-core/        # Daemon library
+  crates/nerve-cli/         # `nerve` binary
+sdks/python/                # Python SDK (sync + asyncio + typed)
+sdks/typescript/            # TypeScript / JavaScript SDK
+agents/                     # Reference adapters (mock, anthropic, openai, demo)
+dashboard/                  # Local web dashboard (served by the daemon)
+benchmarks/                 # Harness, 8 canonical tasks, cassettes
+docs/                       # Architecture, protocol, safety, ADRs, threat model
+packaging/                  # Distro recipes (deb, msi, homebrew, macos pkg)
+scripts/smoke.sh            # End-to-end smoke test
+```
 
-This is the **MVP**. The wire protocol, SDKs, CLI, dashboard, demo, and
-benchmark harness are real and pass `cargo test` + the local smoke test.
-The platform backends ship a portable substrate that works on every OS;
-*native upgrades* (ScreenCaptureKit, UI Automation, AT-SPI) are sketched
-out in the per-platform modules with concrete entry points.
+## Honest limitations
 
-### Current limitations
+- **The market is contested.** ByteDance UI-TARS Desktop, Cua (YC X25),
+  Anthropic Cowork, OpenAI Codex desktop, and Apple Intelligence /
+  Microsoft Agent 365 all ship working products in this space. Nerve is
+  not trying to compete with any of them as a consumer product. It's a
+  hackable foundation for people building something narrower.
+- **Cross-platform is a stated goal but only Windows is verified by the
+  author.** macOS / Linux backends compile but need someone with the
+  hardware to validate end-to-end.
+- **The Anthropic adapter is a reference, not the product.** It exists to
+  prove the wire protocol works against a real model loop. The intended
+  consumption path is "your tool connects to Nerve over WebSocket or a
+  future MCP server", not "Nerve calls the model for you."
+- **OCR and browser-CDP are feature-gated** because both pull in build-time
+  dependencies most users don't have. They work when enabled.
+- **Apple Intelligence and Windows Agent 365** have OS-level hooks that
+  third-party userspace daemons cannot match. If you need the native AI
+  on consumer hardware, use those. Nerve is for everything else.
 
-* Screen capture, input, and clipboard go through `xcap`, `enigo`, and
-  `arboard` respectively. Native APIs are next on the roadmap (see
-  [`docs/platform-backends.md`](./docs/platform-backends.md)).
-* Accessibility tree extraction is stubbed: the compiler can use a tree
-  when one is supplied, but no backend supplies one yet.
-* OCR is not bundled — the compiler returns a screenshot for caller-side
-  OCR (Tesseract / EasyOCR / cloud).
-* The OpenAI / Anthropic / Gemini / Ollama / vLLM adapters are
-  placeholders that fail loud with a clear error message until they are
-  wired.
-* On Wayland, input is best-effort: the daemon advertises
-  `wayland_limited = true` and the doctor command surfaces the consent path.
+## Working AI loop demo
 
-## What ships next
+If you want to see the full Computer Use protocol exercised against the
+real Anthropic API:
 
-1. ScreenCaptureKit on macOS + UI Automation on Windows + AT-SPI on Linux.
-2. Real OpenAI CUA + Anthropic Computer Use adapters.
-3. Built-in OCR (Tesseract via `leptess`) so semantic verification can
-   close the loop without the agent paying for it.
-4. Multi-monitor support and a dedicated cursor-only observation stream
-   for silky 120 fps dashboards.
-5. Hardened Wayland input path via `uinput` (group-gated) and PipeWire
-   capture via xdg-desktop-portal.
+```bash
+# In one terminal
+.\core\target\release\nerve.exe start
+
+# In another
+ANTHROPIC_API_KEY=sk-ant-... \
+  python -m agents.demo.live_screenshot_test
+```
+
+Claude takes one screenshot, describes your real desktop in a paragraph,
+and exits. Cost: ~$0.005. This proves the wire protocol, the platform
+capture, the prompt-cached request, and the `tool_result` loop all work.
+
+For the multi-turn loop with the demo task list:
+
+```bash
+ANTHROPIC_API_KEY=sk-... \
+  python -m agents.demo.run_demo --adapter anthropic --auto-start --max-steps 10
+```
+
+`--live` removes dry-run and lets the model actually drive your mouse and
+keyboard. Use with care.
 
 ## License
 
 Apache-2.0. See [`LICENSE`](./LICENSE).
+
+## Status of active development
+
+Active development on the consumer-product framing has stopped - that
+slot is occupied by larger players. The daemon, protocol, and SDKs are
+maintained as a working reference and a hackable starting point. If
+you're using it for something specific, file an issue and the relevant
+code path will get the attention it needs.

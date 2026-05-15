@@ -402,21 +402,16 @@ fn force_kill(pid: u32) -> Result<()> {
 }
 
 #[cfg(windows)]
-fn graceful_signal(pid: u32) -> Result<()> {
-    // Console daemons receive CTRL_BREAK_EVENT via the process group id.
-    // We can only deliver it to console children whose process group we
-    // started — for foreign pids we fall back to a soft "post WM_CLOSE
-    // to the window" via taskkill /PID <pid>, which the SCM treats as a
-    // shutdown request. SIGKILL equivalent (TerminateProcess) lives in
-    // `force_kill` below.
-    let status = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string()])
-        .status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(anyhow::anyhow!("taskkill exited with status {s}")),
-        Err(e) => Err(anyhow::anyhow!("taskkill: {e}")),
-    }
+fn graceful_signal(_pid: u32) -> Result<()> {
+    // Windows console daemons don't honour `taskkill /PID` without /F
+    // (no window to receive WM_CLOSE) and we can't deliver SIGTERM. The
+    // graceful shutdown path on Windows runs over the WebSocket instead:
+    // the CLI sends EmergencyStop with request_id="cli-stop" and the
+    // daemon schedules `std::process::exit(0)` after flushing audit.
+    // This function is now a no-op; `wait_for_exit` will detect that the
+    // daemon has exited on its own, and `force_kill` is the fallback if
+    // the WS request never landed (e.g. daemon hung).
+    Ok(())
 }
 
 #[cfg(windows)]
