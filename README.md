@@ -1,5 +1,8 @@
 # Nerve
 
+> [!CAUTION]`n> **This project no longer works and is not maintained.** It is retained only as an experimental reference and should not be treated as usable software.
+
+
 A hackable Rust daemon for driving a desktop computer over a WebSocket
 protocol. Mouse, keyboard, clipboard, screenshot, accessibility tree -
 exposed as a single local service that any process (Python, TypeScript,
